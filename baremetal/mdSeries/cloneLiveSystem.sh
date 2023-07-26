@@ -1,7 +1,7 @@
 #!/bin/bash
 # ----------------------------------------------------------------------------
 # mcxSauce repo
-# Author: Aleksi @ MCX
+# Author: Aleksi @ MCX, Matt
 # 
 # This script clones a live source Linux system to a target node.
 # The target node has a dual boot setup, with boot info on /dev/sda (USB stick) 
