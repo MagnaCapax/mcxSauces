@@ -29,9 +29,9 @@ fi
 SOURCE_HOSTNAME=$1
 
 # Partition size templates (change these as needed)
-SWAP_SIZE="32GB"  # Size of the swap partition
-BOOT_SIZE="1GB"   # Size of the boot partition
-ROOT_SIZE="80GB"  # Size of the root partition
+SWAP_SIZE="32"  # Size of the swap partition
+BOOT_SIZE="1"   # Size of the boot partition
+ROOT_SIZE="80"  # Size of the root partition
 OVERPROV_PERCENT=1  # Overprovisioning percentage
 
 # Cleanup and prepare the target disks
@@ -51,20 +51,20 @@ echo "Creating partitions..."
 parted /dev/nvme0n1 mklabel gpt
 
 # Create the swap partition
-parted /dev/nvme0n1 mkpart primary linux-swap 0% $SWAP_SIZE
+parted /dev/nvme0n1 mkpart primary linux-swap 0% ${SWAP_SIZE}GB
 
 # Create the root partition
-parted /dev/nvme0n1 mkpart primary ext4 $SWAP_SIZE $(($SWAP_SIZE + $ROOT_SIZE))
+parted /dev/nvme0n1 mkpart primary ext4 ${SWAP_SIZE}GB $((${SWAP_SIZE} + ${ROOT_SIZE}))GB
 
 # Create the /home partition, leaving some space unpartitioned for overprovisioning
-parted /dev/nvme0n1 mkpart primary ext4 $(($SWAP_SIZE + $ROOT_SIZE)) $(100 - $OVERPROV_PERCENT)%
+parted /dev/nvme0n1 mkpart primary ext4 $((${SWAP_SIZE} + ${ROOT_SIZE}))GB $((100 - $OVERPROV_PERCENT))%
 
 # Create boot partition
 parted /dev/sda mklabel msdos
-parted /dev/sda mkpart primary ext4 0% $BOOT_SIZE
+parted /dev/sda mkpart primary ext4 0% ${BOOT_SIZE}GB
 
 # Create additional partition for /mnt/usb
-parted /dev/sda mkpart primary ext4 $BOOT_SIZE 100%
+parted /dev/sda mkpart primary ext4 ${BOOT_SIZE}GB 100%
 
 # Update the kernel about disk structure change
 partprobe
@@ -93,7 +93,7 @@ mount /dev/sda2 /mnt/target/mnt/usb
 
 # Pull the source system's data
 echo "Pulling data from source system..."
-ssh root@$SOURCE_HOSTNAME 'cd / && tar --exclude={"/dev/*","/proc/*","/sys/*","/tmp/*","/run/*","/mnt/*","/media/*","/lost+found"} -cp --numeric-owner -f - .' | tar xpf - -C /mnt/target
+ssh root@$SOURCE_HOSTNAME 'cd / && tar --exclude={"/dev/*","/proc/*","/sys/*","/tmp/*","/run/*","/mnt/*","/media/*","/lost+found"} -cp --one-file-system --numeric-owner .' | tar xpvf - -C /mnt/target
 
 # Bind mounts
 mount -t proc none /mnt/target/proc
