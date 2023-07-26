@@ -128,10 +128,6 @@ cat > /etc/fstab <<END
 /dev/nvme0n1p1 none            swap    sw              0       0
 END
 
-# Open files that need to be manually edited.
-nano /etc/hostname
-nano /etc/network/interfaces
-
 # Update initramfs and GRUB.
 update-initramfs -u
 update-grub
@@ -139,16 +135,12 @@ update-grub
 # Install GRUB to /dev/sda
 grub-install /dev/sda
 
-echo "Setup complete. Please reboot the system."
-
 EOF
 
+# Open files that need to be manually edited.
+nano /mnt/target/etc/hostname
+nano /mnt/target/etc/network/interfaces
+
 # Exit chroot and unmount filesystems
-umount -l /mnt/target/dev/pts
-umount -l /mnt/target/dev
-umount -l /mnt/target/proc
-umount -l /mnt/target/sys
-umount -l /mnt/target/boot
-umount -l /mnt/target/mnt/usb
-umount -l /mnt/target/home
-umount -l /mnt/target
+umount -R /mnt/target || echo "Filesystems could not be cleanly unmounted. Use lsof to check processes that are still accessing the drive, and umount -R /mnt/target to try again."
+echo "Setup complete. Please reboot the system."
