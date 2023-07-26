@@ -1,14 +1,15 @@
 
-```markdown
 # mcxSauces
+
 This repository hosts all of the scripts and configuration files for Magna Capax's various systems. 
 
 The goal of our hierarchy philosophy is to organize resources in a way that reflects their use cases and their associated systems. We've structured the repository into categories that make sense for our specific systems and scripts, making it intuitive for users to navigate.
 
 ## Repository Structure
+
 Here's an overview of our repository structure:
 
-```
+```bash
 mcxSauces
 │
 ├── README.md
@@ -93,6 +94,3 @@ However, please be aware of the following:
 - This repository may also serve as a form of documentation for us. As such, some scripts or tools may be more of a snapshot of a point in time rather than something we actively use.
 
 Please keep these points in mind when using or referencing this repository. As always, we encourage you to thoroughly review any code or resources before deploying them in your own environment.
-
-
-```
