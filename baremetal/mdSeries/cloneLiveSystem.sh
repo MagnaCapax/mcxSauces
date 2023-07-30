@@ -220,10 +220,12 @@ cat > /etc/fstab <<END
 /dev/nvme0n1p2 /               ext4    errors=remount-ro 0       1
 /dev/nvme0n1p3 /home           ext4    defaults        0       2
 /dev/md1       /boot           ext4    defaults        0       2
-/dev/sda2      /mnt/usb1        ext4    defaults        0       2
-/dev/sdb2      /mnt/usb2        ext4    defaults        0       2
+/dev/sda2      /mnt/usb1        ext4    defaults,nofail        0       2
+/dev/sdb2      /mnt/usb2        ext4    defaults,nofail        0       2
 /dev/nvme0n1p1 none            swap    sw              0       0
 END
+
+mdadm --detail --scan > /etc/mdadm/mdadm.conf
 
 # Update initramfs and GRUB.
 update-initramfs -u
