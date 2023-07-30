@@ -1,23 +1,21 @@
 #!/bin/bash
 # ----------------------------------------------------------------------------
-# mcxSauce repo
+# cloneLiveSystem  from  mcxSauce repo
 # Author: Aleksi @ MCX, Matt
 #
 # This script clones a live source Linux system to a target node.
-# The target node has a dual boot setup, with boot info on /dev/sda (USB stick)
+# The target node has a dual boot setup, with boot info on /dev/md1 (2xUSB stick)
 # and bulk storage on an NVMe drive. The script also sets up overprovisioning
 # for the NVMe drive.
 #
 # The reason for this approach is that some BIOS Firmware actively prevents booting
 # from NVMe drives larger than 2TB unless the system is installed from a UEFI-booted
-# installer. Unfortunately, this is an uncommon practice for PXE installers and can
-# be difficult to implement. In particular, Debian preseeds have fatal shortcomings
-# which make it hard to adapt a preseed for this kind of setup.
-# Adding a USB stick for boot also adds more flexibility for end users.
+# installer and booted as UEFI. Unfortunately, this is an uncommon practice for PXE 
+# installers and can # be difficult to implement. In particular, Debian preseeds
+# have fatal shortcomings # which make it hard to adapt a preseed for this kind of setup.
+# Adding a USB sticks for boot also adds more flexibility for end users.
 #
-# Usage: ./clone_linux_system.sh <source_hostname>
-# Example: ./clone_linux_system.sh server1
-#
+# Usage: ./cloneLiveSystem.sh <source_hostname>
 #
 #
 # This program is free software: you can redistribute it and/or modify
@@ -139,6 +137,8 @@ mdadm --zero-superblock /dev/sda1 || true
 mdadm --zero-superblock /dev/sdb1 || true
 print_step "Start actual partitioning, create md1"
 mdadm --create --quiet /dev/md1 -l1 -n2 /dev/sd[ab]1  --metadata=1.2
+# Slow down resync for faster install, after reboot resumes at max speed
+echo 5 > /sys/block/md1/md/sync_speed_max
 
 print_step "Create swap"
 mkswap /dev/nvme0n1p1
@@ -231,8 +231,8 @@ EOF
 hostname=$(cat /proc/cmdline | grep -o 'hostname=[^ ]*' | cut -d= -f2)
 echo "${hostname}.puledmedia.com" > /mnt/target/etc/hostname
 
-echo <<EOF
-27.0.0.1       localhost
+echo <<EOF > /mnt/target/etc/hosts
+127.0.0.1       localhost
 185.148.1.55    {$hostname} {$hostname}.pulsedmedia.com
 
 # The following lines are desirable for IPv6 capable hosts
@@ -241,9 +241,11 @@ ff02::1 ip6-allnodes
 ff02::2 ip6-allrouters
 EOF
 
+
+
 ip_and_mask=$(ip -o -f inet addr show | awk '/scope global/ {print $4}')
 ip_address=${ip_and_mask%%/*}
-netmask=$(ipcalc $ip_and_mask | grep Netmask | awk '{print $2}')
+netmask=$(printf "%d." $(echo $(ifconfig | grep Mask | awk '{print $4}' | cut -d ':' -f2) | tr '.' ' ') ; echo 0 | cut -d '.' -f1,2,3,4)
 
 # Get Gateway
 gateway=$(ip route | awk '/default/ {print $3}')
