@@ -17,6 +17,21 @@
 #
 # Usage: ./clone_linux_system.sh <source_hostname>
 # Example: ./clone_linux_system.sh server1
+#
+#
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program. If not, see <https://www.gnu.org/licenses/>.
 # ----------------------------------------------------------------------------
 set -e
 
@@ -154,18 +169,21 @@ mount /dev/sdb2 /mnt/target/mnt/usb2
 
 # Pull the source system's data
 print_step "Downloading root file system archive..."
-rsync -aAXv --exclude={"/dev/*","/proc/*","/sys/*","/tmp/*","/run/*","/mnt/*","/media/*","/lost+found"} root@$SOURCE_HOSTNAME:/ /mnt/target
+rsync -aAXv -e "ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null" --exclude={"/dev/*","/proc/*","/sys/*","/tmp/*","/run/*","/mnt/*","/media/*","/lost+found"} root@$SOURCE_HOSTNAME:/ /mnt/target
 
 #wget https://_STORAGE_SERVER_URI_/bookworm.tar.gz -O /dev/shm/bookworm.tar.gz
 #print_step "Unpacking root file system..."
 #tar xpf /dev/shm/bookworm.tar.gz --xattrs-include='*.*' --numeric-owner -C /mnt/target
 
 # Bind mounts
-print_step "Mounting virtual kernel file systems..."
+print_step "Mounting virtual kernel file systems and preparing chroot..."
 mount -t proc none /mnt/target/proc
 mount -o bind /dev /mnt/target/dev
 mount -o bind /sys /mnt/target/sys
 mount -t devpts none /mnt/target/dev/pts
+
+
+
 
 # Chroot into the new system
 print_step "Entering the chroot environment..."
@@ -175,9 +193,12 @@ export PATH="/usr/sbin:/usr/bin:/sbin/bin"
 # Strip out unique system identifiers.
 echo "Stripping unique system identifiers..."
 rm -f /etc/ssh/ssh_host_*
-dpkg-reconfigure openssh-server
+ssh-keygen -A
 rm /etc/machine-id
 systemd-machine-id-setup
+
+sudo sed -i '/^RESUME=UUID=6a784fef-4385-48d4-b12f-ca4419ec7e26/d' /etc/initramfs-tools/conf.d/resume
+
 
 # Prefill /etc/fstab with basic settings.
 cat > /etc/fstab <<END
@@ -207,8 +228,49 @@ wait %1 %2
 
 EOF
 
+hostname=$(cat /proc/cmdline | grep -o 'hostname=[^ ]*' | cut -d= -f2)
+echo "${hostname}.puledmedia.com" > /mnt/target/etc/hostname
+
+echo <<EOF
+27.0.0.1       localhost
+185.148.1.55    {$hostname} {$hostname}.pulsedmedia.com
+
+# The following lines are desirable for IPv6 capable hosts
+::1     localhost ip6-localhost ip6-loopback
+ff02::1 ip6-allnodes
+ff02::2 ip6-allrouters
+EOF
+
+ip_and_mask=$(ip -o -f inet addr show | awk '/scope global/ {print $4}')
+ip_address=${ip_and_mask%%/*}
+netmask=$(ipcalc $ip_and_mask | grep Netmask | awk '{print $2}')
+
+# Get Gateway
+gateway=$(ip route | awk '/default/ {print $3}')
+
+# Create the Debian /etc/network/interfaces file
+cat <<EOF > /mnt/target/etc/network/interfaces
+# This file describes the network interfaces available on your system
+# and how to activate them. For more information, see interfaces(5).
+
+source /etc/network/interfaces.d/*
+
+# The loopback network interface
+auto lo
+iface lo inet loopback
+
+# The primary network interface
+auto eth0
+iface eth0 inet static
+    address $ip_address
+    netmask $netmask
+    gateway $gateway
+EOF
+
+
 # Open files that need to be manually edited.
 nano /mnt/target/etc/hostname
+nano /mnt/target/etc/hosts
 nano /mnt/target/etc/network/interfaces
 
 # Exit chroot and unmount filesystems
