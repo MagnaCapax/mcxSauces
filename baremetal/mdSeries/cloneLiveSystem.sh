@@ -135,8 +135,8 @@ refresh_partitions
 
 # Format the partitions
 print_step "Formatting the partitions... Step1: Re-clear md superblock"
-mdadm --stop /dev/md1    # Sometimes it gets auto-assembled
-mdadm --stop /dev/md127    # Sometimes it gets auto-assembled
+mdadm --stop /dev/md1  || true   # Sometimes it gets auto-assembled
+mdadm --stop /dev/md127  || true   # Sometimes it gets auto-assembled
 mdadm --zero-superblock /dev/sda1 || true
 mdadm --zero-superblock /dev/sdb1 || true
 wipefs -a /dev/sda1
