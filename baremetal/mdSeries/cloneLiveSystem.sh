@@ -205,7 +205,7 @@ ssh-keygen -A
 rm /etc/machine-id
 systemd-machine-id-setup
 
-sudo sed -i '/^RESUME=UUID=6a784fef-4385-48d4-b12f-ca4419ec7e26/d' /etc/initramfs-tools/conf.d/resume
+sed -i '/^RESUME=UUID=6a784fef-4385-48d4-b12f-ca4419ec7e26/d' /etc/initramfs-tools/conf.d/resume
 
 
 # Prefill /etc/fstab with basic settings.
@@ -232,9 +232,8 @@ update-initramfs -u
 update-grub
 
 # Install GRUB to /dev/sda
-grub-install /dev/sda &
-grub-install /dev/sdb &
-wait %1 %2
+grub-install /dev/sda
+grub-install /dev/sdb
 
 EOF
 
