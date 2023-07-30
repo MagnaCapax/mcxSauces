@@ -88,10 +88,12 @@ mdadm --stop --scan || true
 for array in /dev/md*; do
    mdadm --stop "$array" || true
 done
-
+dd if=/dev/zero of=/dev/sda bs=1M count=100 &
+dd if=/dev/zero of=/dev/sdb bs=1M count=100 &
 wipefs -a /dev/sda
 wipefs -a /dev/sdb
 wipefs -a /dev/nvme0n1
+blkdiscard /dev/nvme0n1
 mdadm --zero-superblock /dev/sda || true
 mdadm --zero-superblock /dev/sda1 || true
 mdadm --zero-superblock /dev/sdb || true
@@ -134,6 +136,7 @@ refresh_partitions
 # Format the partitions
 print_step "Formatting the partitions... Step1: Re-clear md superblock"
 mdadm --stop /dev/md1    # Sometimes it gets auto-assembled
+mdadm --stop /dev/md127    # Sometimes it gets auto-assembled
 mdadm --zero-superblock /dev/sda1 || true
 mdadm --zero-superblock /dev/sdb1 || true
 wipefs -a /dev/sda1
