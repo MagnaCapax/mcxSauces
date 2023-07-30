@@ -133,11 +133,15 @@ refresh_partitions
 
 # Format the partitions
 print_step "Formatting the partitions... Step1: Re-clear md superblock"
+mdadm --stop /dev/md1    # Sometimes it gets auto-assembled
 mdadm --zero-superblock /dev/sda1 || true
 mdadm --zero-superblock /dev/sdb1 || true
-print_step "Start actual partitioning after sleeping 2 seconds, create md1"
-sleep 2;
+wipefs -a /dev/sda1
+wipefs -a /dev/sdb2
+refresh_partitions
+print_step "Create md1"
 mdadm --create --quiet /dev/md1 -l1 -n2 /dev/sd[ab]1  --metadata=1.2
+
 # Slow down resync for faster install, after reboot resumes at max speed
 echo 5 > /sys/block/md1/md/sync_speed_max
 
