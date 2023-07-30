@@ -239,9 +239,9 @@ EOF
 hostname=$(cat /proc/cmdline | grep -o 'hostname=[^ ]*' | cut -d= -f2)
 echo "${hostname}.puledmedia.com" > /mnt/target/etc/hostname
 
-echo <<EOF > /mnt/target/etc/hosts
+cat <<EOF > /mnt/target/etc/hosts
 127.0.0.1       localhost
-185.148.1.55    {$hostname} {$hostname}.pulsedmedia.com
+185.148.1.55    ${hostname} ${hostname}.pulsedmedia.com
 
 # The following lines are desirable for IPv6 capable hosts
 ::1     localhost ip6-localhost ip6-loopback
@@ -252,8 +252,6 @@ EOF
 
 
 ip_and_mask=$(ip -o -f inet addr show | awk '/scope global/ {print $4}')
-ip_address=${ip_and_mask%%/*}
-netmask=$(printf "%d." $(echo $(ifconfig | grep Mask | awk '{print $4}' | cut -d ':' -f2) | tr '.' ' ') ; echo 0 | cut -d '.' -f1,2,3,4)
 
 # Get Gateway
 gateway=$(ip route | awk '/default/ {print $3}')
@@ -272,8 +270,7 @@ iface lo inet loopback
 # The primary network interface
 auto eth0
 iface eth0 inet static
-    address $ip_address
-    netmask $netmask
+    address $ip_and_mask
     gateway $gateway
 EOF
 
