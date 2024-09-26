@@ -240,7 +240,7 @@ EOF
 hostname=$(cat /proc/cmdline | grep -o 'hostname=[^ ]*' | cut -d= -f2)
 ip_and_mask=$(ip -o -f inet addr show | awk '/scope global/ {print $4}')
 ip_address=${ip_and_mask%%/*}
-echo "${hostname}.puledmedia.com" > /mnt/target/etc/hostname
+echo "${hostname}.pulsedmedia.com" > /mnt/target/etc/hostname
 
 cat <<EOF > /mnt/target/etc/hosts
 127.0.0.1       localhost
