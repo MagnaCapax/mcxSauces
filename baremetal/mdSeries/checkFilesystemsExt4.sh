@@ -30,16 +30,16 @@
 # Use at your own risk.
 #
 # ----------------------------------------------------------------------------
-set -e
 
-### Options & Defaults ###
+### Defaults and Option Variables ###
 DRY_RUN=0
 JSON_OUTPUT=0
 NO_COLOR=0
+TIMEOUT_SECS=600  # Default: 600 seconds (10 minutes)
 
 # Process command-line options.
-for arg in "$@"; do
-    case "$arg" in
+while [[ $# -gt 0 ]]; do
+    case "$1" in
         --dry-run)
             DRY_RUN=1
             shift
@@ -52,7 +52,17 @@ for arg in "$@"; do
             NO_COLOR=1
             shift
             ;;
+        --timeout)
+            shift
+            TIMEOUT_SECS="$1"
+            shift
+            ;;
+        --timeout=*)
+            TIMEOUT_SECS="${1#*=}"
+            shift
+            ;;
         *)
+            shift
             ;;
     esac
 done
@@ -61,7 +71,7 @@ done
 LOGFILE="/tmp/ext_fs_check.log"
 exec > >(tee -a "$LOGFILE") 2>&1
 
-# ANSI color codes or plain text if --no-color is given.
+# Set ANSI color codes (or disable if --no-color is provided)
 if [ "$NO_COLOR" -eq 1 ]; then
   CYAN=""
   WHITE=""
@@ -81,6 +91,10 @@ print_step() {
   echo -e "${CYAN}=> ${WHITE}$*${NC}"
 }
 
+# Arrays for tracking devices.
+declare -a REPAIRED_DEVICES
+declare -a FAILED_DEVICES
+
 # Summary counters.
 COUNT_TOTAL=0
 COUNT_SKIPPED=0
@@ -95,8 +109,8 @@ fi
 
 print_step "Scanning for available EXT filesystems..."
 
-# Retrieve block device info using lsblk. Use full paths (-p) and no headers (-n).
-# Also remove any tree-format characters using sed.
+# Retrieve block device info using lsblk (full paths, no headers).
+# Remove any leading tree-format characters.
 lsblk_output=$(lsblk -pn -o NAME,FSTYPE,TYPE,MOUNTPOINT 2>/dev/null | sed -E 's/^[^\/]*//')
 
 # Extract unique device paths with FSTYPE starting with "ext".
@@ -104,29 +118,35 @@ ext_devices=$(echo "$lsblk_output" | awk '$2 ~ /^ext/ {print $1}' | sort -u)
 
 echo -e "${YELLOW}Devices with EXT filesystems found:${NC}"
 for dev in $ext_devices; do
-    # Get mountpoint from lsblk output.
+    # Get mountpoint info from lsblk output.
     mnt=$(echo "$lsblk_output" | grep -E "^$dev[[:space:]]" | awk '{print $4}')
     [ -z "$mnt" ] && mnt="Not mounted"
     echo -e "${WHITE}  Device: $dev    Mountpoint(s): $mnt${NC}"
 done
 
-print_step "Starting e2fsck checks on unmounted devices..."
+print_step "Starting e2fsck checks on unmounted devices (timeout: ${TIMEOUT_SECS}s)..."
+
+# Function to send an alert via syslog.
+alert_failure() {
+    local dev="$1"
+    logger -t ext_fs_check "ALERT: Device $dev reported 'bad magic number in super-block'. Manual intervention may be required."
+    echo -e "${RED}ALERT: $dev requires manual intervention! Check backups and consider superblock recovery.${NC}"
+}
 
 # Function to run e2fsck on a given device.
 run_e2fsck() {
     local dev="$1"
     print_step ">>> Initiating filesystem check on $dev ..."
-    local e2fsck_output
-    local retcode
-    # If dry-run, simply print the intended command.
+    local e2fsck_output retcode
+
     if [ "$DRY_RUN" -eq 1 ]; then
       echo "[DRY-RUN] Would run: e2fsck -f -y $dev"
       return 0
     fi
 
-    # Check if 'expect' is available. If so, use it.
+    # Run e2fsck with a configurable timeout.
     if command -v expect >/dev/null 2>&1; then
-        e2fsck_output=$(expect <<EOF
+        e2fsck_output=$(timeout "${TIMEOUT_SECS}"s expect <<EOF
 set timeout 60
 spawn e2fsck -f -y "$dev"
 expect {
@@ -138,30 +158,37 @@ EOF
         retcode=$?
     else
         print_step "Fallback: using 'yes' pipe for $dev"
-        # Use the "yes" command to provide many y's.
-        e2fsck_output=$(yes | e2fsck -f -y "$dev")
+        e2fsck_output=$(timeout "${TIMEOUT_SECS}"s yes | e2fsck -f -y "$dev")
         retcode=$?
     fi
 
-    # Check for a superblock error in the output.
+    # Check for a superblock error.
     if echo "$e2fsck_output" | grep -qi "bad magic number in super-block"; then
         echo -e "${RED}WARNING: $dev reported a 'bad magic number in super-block'.${NC}"
-        echo "This indicates a possible superblock corruption."
         echo "Suggested manual recovery commands:"
-        echo "    mke2fs -n $dev        # To list backup superblock locations"
-        echo "    e2fsck -b <backup> -y $dev  # To try using a backup superblock (replace <backup> with one of the listed blocks)"
+        echo "    mke2fs -n $dev        # List backup superblock locations"
+        echo "    e2fsck -b <backup> -y $dev  # Use a backup superblock (replace <backup> with one listed)"
+        alert_failure "$dev"
         COUNT_ERRORS=$((COUNT_ERRORS+1))
+        FAILED_DEVICES+=("$dev")
         return 1
     fi
 
-    # If the return code is non-zero, count as an error.
-    if [ "$retcode" -ne 0 ]; then
+    # Treat exit codes 0 and 1 as acceptable (1 means filesystem modified and repaired).
+    if [ "$retcode" -eq 0 ] || [ "$retcode" -eq 1 ]; then
+        if [ "$retcode" -eq 1 ]; then
+            REPAIRED_DEVICES+=("$dev")
+            echo -e "${CYAN}e2fsck completed on $dev with exit code $retcode: Filesystem modified.${NC}"
+            echo -e "${CYAN}Last few lines of e2fsck output:${NC}"
+            echo "$e2fsck_output" | tail -n 10
+        else
+            echo -e "${CYAN}e2fsck completed successfully on $dev (exit code $retcode)${NC}"
+        fi
+        COUNT_OK=$((COUNT_OK+1))
+    else
         echo -e "${RED}ERROR: e2fsck failed on $dev with return code $retcode${NC}"
         COUNT_ERRORS=$((COUNT_ERRORS+1))
-        return $retcode
-    else
-        echo -e "${CYAN}e2fsck completed successfully on $dev${NC}"
-        COUNT_OK=$((COUNT_OK+1))
+        FAILED_DEVICES+=("$dev")
     fi
     return 0
 }
@@ -169,47 +196,73 @@ EOF
 # Process each found device.
 for dev in $ext_devices; do
     COUNT_TOTAL=$((COUNT_TOTAL+1))
-    # Verify the device exists and is a block device.
+
+    # Verify device is valid.
     if [ ! -b "$dev" ]; then
         echo -e "${RED}Skipping $dev: not a valid block device.${NC}"
         COUNT_SKIPPED=$((COUNT_SKIPPED+1))
         continue
     fi
 
-    # Additional mounted check using /proc/mounts.
+    # Additional mount check using /proc/mounts.
     if grep -q "^$dev " /proc/mounts; then
-        echo -e "${YELLOW}Skipping $dev: device appears mounted as per /proc/mounts.${NC}"
+        echo -e "${YELLOW}Skipping $dev: appears mounted as per /proc/mounts.${NC}"
         COUNT_SKIPPED=$((COUNT_SKIPPED+1))
         continue
     fi
 
-    # Check for LUKS or ZFS: use blkid.
+    # Skip LUKS or ZFS devices.
     fstype=$(blkid -o value -s TYPE "$dev" 2>/dev/null || echo "")
     if [[ "$fstype" == "crypto_LUKS" || "$fstype" == "zfs_member" ]]; then
-        echo -e "${YELLOW}Skipping $dev: filesystem type ($fstype) is not supported for e2fsck.${NC}"
+        echo -e "${YELLOW}Skipping $dev: unsupported filesystem type ($fstype).${NC}"
         COUNT_SKIPPED=$((COUNT_SKIPPED+1))
         continue
     fi
 
-    # Run e2fsck on the device.
-    run_e2fsck "$dev"
+    # Pre-check: ensure device is readable.
+    if ! dd if="$dev" bs=512 count=1 iflag=direct of=/dev/null 2>/dev/null; then
+        echo -e "${RED}WARNING: Cannot read from $dev (I/O error). Skipping.${NC}"
+        COUNT_SKIPPED=$((COUNT_SKIPPED+1))
+        continue
+    fi
+
+    # Skip devices smaller than 100MB.
+    fs_size=$(blockdev --getsize64 "$dev" 2>/dev/null || echo 0)
+    if [ "$fs_size" -lt 104857600 ]; then
+        echo -e "${YELLOW}Skipping $dev: size ($fs_size bytes) is less than 100MB.${NC}"
+        COUNT_SKIPPED=$((COUNT_SKIPPED+1))
+        continue
+    fi
+
+    # Run e2fsck on this device.
+    run_e2fsck "$dev" || true
 done
 
-# Print summary.
+# Print final summary.
 print_step "Summary:"
 echo -e "${WHITE}  Devices processed  : $COUNT_TOTAL${NC}"
 echo -e "${WHITE}  Devices skipped    : $COUNT_SKIPPED${NC}"
 echo -e "${WHITE}  Successful checks  : $COUNT_OK${NC}"
 echo -e "${WHITE}  Errors encountered : $COUNT_ERRORS${NC}"
 
-# If JSON output was requested, print a JSON summary.
+if [ "${#REPAIRED_DEVICES[@]}" -gt 0 ]; then
+    echo -e "${YELLOW}  Devices repaired   : ${REPAIRED_DEVICES[*]}${NC}"
+fi
+
+if [ "${#FAILED_DEVICES[@]}" -gt 0 ]; then
+    echo -e "${RED}  Devices failed     : ${FAILED_DEVICES[*]}${NC}"
+fi
+
+# JSON summary output if requested.
 if [ "$JSON_OUTPUT" -eq 1 ]; then
     echo
     echo -e "${WHITE}{"
     echo "  \"devices_total\": $COUNT_TOTAL,"
     echo "  \"devices_skipped\": $COUNT_SKIPPED,"
     echo "  \"checks_successful\": $COUNT_OK,"
-    echo "  \"errors\": $COUNT_ERRORS"
+    echo "  \"errors\": $COUNT_ERRORS,"
+    echo "  \"devices_repaired\": \"${REPAIRED_DEVICES[*]}\","
+    echo "  \"devices_failed\": \"${FAILED_DEVICES[*]}\""
     echo "}"
     echo -e "${NC}"
 fi
