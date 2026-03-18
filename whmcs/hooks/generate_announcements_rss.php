@@ -71,6 +71,8 @@
  *   php -r "require 'init.php'; pmGenerateAnnouncementsRss();"
  *   (init.php auto-loads all hook files — do NOT require the hook separately)
  *
+ * Made for pulsedmedia.com
+ *
  * SPDX-License-Identifier: Apache-2.0
  *
  * @author    Aleksi Ursin <aleksi@magnacapax.fi>
