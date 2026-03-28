@@ -220,6 +220,21 @@ if (!defined('PM_ANTIFRAUD_BLOCK_MESSAGE')) {
 }
 
 /**
+ * Debug mode — dump raw $vars and $_SESSION['cart'] to a debug JSONL file.
+ *
+ * Set to a positive integer N to dump the next N checkout evaluations,
+ * then stop. Set to 0 (default) to disable. The debug log is written
+ * alongside the audit log: <log_dir>/debug_YYYYMMDD.jsonl
+ *
+ * The debug dump contains raw checkout data including email addresses.
+ * Delete it after diagnosis. Ensure the log directory is NOT web-accessible
+ * (e.g., .htaccess deny-all or nginx location block).
+ */
+if (!defined('PM_ANTIFRAUD_DEBUG')) {
+    define('PM_ANTIFRAUD_DEBUG', 0);
+}
+
+/**
  * Real-city whitelist for suffix-based detection.
  *
  * Cities that end with a Faker suffix but are real places.
@@ -593,21 +608,29 @@ add_hook('ShoppingCartValidateCheckout', 1, function ($vars) {
     $threshold = PM_ANTIFRAUD_THRESHOLD;
 
     try {
-        // Extract checkout fields from POST data
-        $city        = $_POST['city'] ?? '';
-        $country     = $_POST['country'] ?? '';
-        $email       = $_POST['email'] ?? '';
-        $emailoptout = $_POST['emailoptout'] ?? false;
+        // Extract checkout fields from hook vars (preferred) with POST fallback
+        $city        = $vars['city'] ?? $_POST['city'] ?? '';
+        $country     = $vars['country'] ?? $_POST['country'] ?? '';
+        $email       = $vars['email'] ?? $_POST['email'] ?? '';
+        $emailoptout = $vars['emailoptout'] ?? $_POST['emailoptout'] ?? false;
 
-        // Extract product name from session cart
+        // Extract product name from session cart via database lookup.
+        // $_SESSION['cart']['products'] contains pid (product ID), not the
+        // product name. Query tblproducts to resolve pid → name.
         $productName = '';
         if (isset($_SESSION['cart']['products']) && is_array($_SESSION['cart']['products'])) {
             $products = $_SESSION['cart']['products'];
             if (!empty($products)) {
                 $firstProduct = reset($products);
-                $productName  = $firstProduct['productinfo']['name']
-                    ?? $firstProduct['product_name']
-                    ?? '';
+                $pid = $firstProduct['pid'] ?? 0;
+                if ($pid > 0 && class_exists('\WHMCS\Database\Capsule')) {
+                    $row = \WHMCS\Database\Capsule::table('tblproducts')
+                        ->where('id', $pid)
+                        ->value('name');
+                    if ($row !== null) {
+                        $productName = (string) $row;
+                    }
+                }
             }
         }
 
@@ -651,6 +674,36 @@ add_hook('ShoppingCartValidateCheckout', 1, function ($vars) {
                     $logEntry . "\n",
                     FILE_APPEND | LOCK_EX
                 );
+            }
+
+            // Debug dump — raw $vars and cart session for N orders, then stop.
+            if (PM_ANTIFRAUD_DEBUG > 0) {
+                $counterFile = $logDir . '/.debug_counter';
+                $remaining   = PM_ANTIFRAUD_DEBUG;
+
+                if (is_file($counterFile)) {
+                    $remaining = (int) file_get_contents($counterFile);
+                }
+
+                if ($remaining > 0) {
+                    $debugEntry = json_encode([
+                        'ts'           => gmdate('c'),
+                        'remaining'    => $remaining,
+                        'vars_keys'    => array_keys($vars),
+                        'vars'         => $vars,
+                        'session_cart' => $_SESSION['cart'] ?? null,
+                    ], JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE);
+
+                    if ($debugEntry !== false) {
+                        @file_put_contents(
+                            $logDir . '/debug_' . gmdate('Ymd') . '.jsonl',
+                            $debugEntry . "\n",
+                            FILE_APPEND | LOCK_EX
+                        );
+                    }
+
+                    @file_put_contents($counterFile, (string) ($remaining - 1), LOCK_EX);
+                }
             }
         }
 
