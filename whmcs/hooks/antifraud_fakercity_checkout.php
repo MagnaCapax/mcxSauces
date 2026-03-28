@@ -55,7 +55,7 @@
  *
  * WHAT THIS HOOK DOES
  * -------------------
- * On ShoppingCartValidationCheckout (fires before order creation),
+ * On ShoppingCartValidateCheckout (fires before order creation),
  * evaluates the submitted checkout data against a weighted scoring
  * model. Each signal that fires adds points. If the total score meets
  * or exceeds the threshold, the order is blocked with a generic error.
@@ -589,7 +589,7 @@ function pm_antifraud_score(array $fields, string $productName): array
 // Hook registration
 // ---------------------------------------------------------------------------
 
-add_hook('ShoppingCartValidationCheckout', 1, function ($vars) {
+add_hook('ShoppingCartValidateCheckout', 1, function ($vars) {
     $threshold = PM_ANTIFRAUD_THRESHOLD;
 
     try {
