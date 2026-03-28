@@ -220,19 +220,10 @@ if (!defined('PM_ANTIFRAUD_BLOCK_MESSAGE')) {
 }
 
 /**
- * Debug mode — dump raw $vars and $_SESSION['cart'] to a debug JSONL file.
- *
- * Set to a positive integer N to dump the next N checkout evaluations,
- * then stop. Set to 0 (default) to disable. The debug log is written
- * alongside the audit log: <log_dir>/debug_YYYYMMDD.jsonl
- *
- * The debug dump contains raw checkout data including email addresses.
- * Delete it after diagnosis. Ensure the log directory is NOT web-accessible
- * (e.g., .htaccess deny-all or nginx location block).
+ * Debug mode — set to true to dump raw $vars and $_SESSION['cart']
+ * to <log_dir>/debug_YYYYMMDD.jsonl. Contains PII — delete after use.
  */
-if (!defined('PM_ANTIFRAUD_DEBUG')) {
-    define('PM_ANTIFRAUD_DEBUG', 0);
-}
+$PM_ANTIFRAUD_DEBUG = false;
 
 /**
  * Real-city whitelist for suffix-based detection.
@@ -604,7 +595,7 @@ function pm_antifraud_score(array $fields, string $productName): array
 // Hook registration
 // ---------------------------------------------------------------------------
 
-add_hook('ShoppingCartValidateCheckout', 1, function ($vars) {
+add_hook('ShoppingCartValidateCheckout', 1, function ($vars) use ($PM_ANTIFRAUD_DEBUG) {
     $threshold = PM_ANTIFRAUD_THRESHOLD;
 
     try {
@@ -676,34 +667,14 @@ add_hook('ShoppingCartValidateCheckout', 1, function ($vars) {
                 );
             }
 
-            // Debug dump — raw $vars and cart session for N orders, then stop.
-            if (PM_ANTIFRAUD_DEBUG > 0) {
-                $counterFile = $logDir . '/.debug_counter';
-                $remaining   = PM_ANTIFRAUD_DEBUG;
-
-                if (is_file($counterFile)) {
-                    $remaining = (int) file_get_contents($counterFile);
-                }
-
-                if ($remaining > 0) {
-                    $debugEntry = json_encode([
-                        'ts'           => gmdate('c'),
-                        'remaining'    => $remaining,
-                        'vars_keys'    => array_keys($vars),
-                        'vars'         => $vars,
-                        'session_cart' => $_SESSION['cart'] ?? null,
-                    ], JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE);
-
-                    if ($debugEntry !== false) {
-                        @file_put_contents(
-                            $logDir . '/debug_' . gmdate('Ymd') . '.jsonl',
-                            $debugEntry . "\n",
-                            FILE_APPEND | LOCK_EX
-                        );
-                    }
-
-                    @file_put_contents($counterFile, (string) ($remaining - 1), LOCK_EX);
-                }
+            // Debug dump
+            if ($PM_ANTIFRAUD_DEBUG) {
+                @file_put_contents(
+                    $logDir . '/debug_' . gmdate('Ymd') . '.jsonl',
+                    json_encode(['ts' => gmdate('c'), 'vars' => $vars, 'session_cart' => $_SESSION['cart'] ?? null],
+                        JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE) . "\n",
+                    FILE_APPEND | LOCK_EX
+                );
             }
         }
 
