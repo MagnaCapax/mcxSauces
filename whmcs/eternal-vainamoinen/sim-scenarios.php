@@ -17,13 +17,13 @@ const SEEDS          = 6;
    each carry a seedbox + a storage SKU; two SSD groups (g4,g5); g3 is the premium pool. */
 function buildTypes(): array {
     return [
-        'hdd_seedbox_a' => new SimType('hdd_seedbox_a','g1','workhorse',1.0, 1.0,1.0,1.0, 3,1, 0.30),
-        'hdd_storage_a' => new SimType('hdd_storage_a','g1','workhorse',2.0, 1.5,1.3,1.0, 3,1, 0.25),
-        'hdd_seedbox_b' => new SimType('hdd_seedbox_b','g2','workhorse',1.0, 1.0,1.0,1.0, 2,1, 0.30),
-        'hdd_storage_b' => new SimType('hdd_storage_b','g2','workhorse',2.0, 1.5,1.3,1.0, 2,1, 0.25),
-        'ssd_a'         => new SimType('ssd_a','g4','workhorse',0.5, 1.2,1.0,1.0, 1,1, 0.30),
-        'ssd_b'         => new SimType('ssd_b','g5','workhorse',0.5, 1.2,1.3,1.0, 1,1, 0.25),
-        'premium_rare'  => new SimType('premium_rare','g3','rare',2.73, 1.0,1.0,1.0, 1,1, 0.20),
+        'hdd_seedbox_a' => new SimType('hdd_seedbox_a','g1','workhorse',1.0, 1.0,1.0,1.0, 3, 0.30),
+        'hdd_storage_a' => new SimType('hdd_storage_a','g1','workhorse',2.0, 1.5,1.3,1.0, 3, 0.25),
+        'hdd_seedbox_b' => new SimType('hdd_seedbox_b','g2','workhorse',1.0, 1.0,1.0,1.0, 2, 0.30),
+        'hdd_storage_b' => new SimType('hdd_storage_b','g2','workhorse',2.0, 1.5,1.3,1.0, 2, 0.25),
+        'ssd_a'         => new SimType('ssd_a','g4','workhorse',0.5, 1.2,1.0,1.0, 1, 0.30),
+        'ssd_b'         => new SimType('ssd_b','g5','workhorse',0.5, 1.2,1.3,1.0, 1, 0.25),
+        'premium_rare'  => new SimType('premium_rare','g3','rare',2.73, 1.0,1.0,1.0, 1, 0.20),
     ];
 }
 function buildGroups(string $scenario): array {

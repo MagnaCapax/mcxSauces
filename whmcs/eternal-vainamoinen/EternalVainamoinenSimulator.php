@@ -51,7 +51,6 @@ final class SimType
         public float $withinTierBias,
         public float $multiplier,
         public int $setAsideN,        // per-SKU protection level (the free − N reserve)
-        public int $stockThreshold,   // suppress once released-but-unsold reaches this
         public float $claimRate,      // per-tick probability a released-unsold slot is claimed (synthetic demand)
         public int $qty = 0,          // released-but-unsold
         public int $active = 0,       // claimed (live customers)
@@ -160,27 +159,30 @@ final class EternalVainamoinenSimulator
                     // (pool − reserve). Every SKU in the group divides the SAME pool, so a claim on one shrinks
                     // the free count of all its siblings — the production cron must derive free the same way.
                     $free = (int) floor(max(0.0, $g->poolFreeTiB - $g->reserveTiB) / $t->sizeTiB);
-                    $slotTypes[$id] = new SlotType($id, $free, $t->setAsideN, $t->qty, $t->stockThreshold,
+                    $slotTypes[$id] = new SlotType($id, $free, $t->setAsideN, $t->qty,
                         $t->tierWeight, $t->withinTierBias, $t->multiplier);
                     if ($free < $minFree[$id])               { $minFree[$id] = $free; }
                     if ($free - $t->setAsideN <= 0)          { $ticksAtFloor[$id]++; }   // at/below the reserve floor
                 }
 
-                $streamActive   = $this->sumActive(array_keys($streamTypes[$s]));
-                $monthlyTgt     = $streamTarget[$s] / max(1, $this->campaignMonths);
-                $monthlyRemain  = max(0.0, $monthlyTgt - ($streamActive - $activeAtMonthStart[$s]));
-                $totalRemain    = max(0.0, (float) ($streamTarget[$s] - $streamActive));
-                // The rare stream can opt OUT of the never-zero floor (rareDailyFloor=0) so it slows down when
-                // ahead and spreads evenly, instead of racing to a small target and stopping (front-loading).
-                $dailyFloor = ($s === 'rare' && array_key_exists('rareDailyFloor', $this->opts))
-                    ? (float) $this->opts['rareDailyFloor']
-                    : EternalVainamoinenRelease::dailyFloorRate($monthlyTgt, $this->intervalSeconds);
-                $pace = new Pacing(
-                    $dailyFloor,
-                    EternalVainamoinenRelease::rate($monthlyRemain, $monthSecondsLeft, $this->intervalSeconds),
-                    EternalVainamoinenRelease::rate($totalRemain,  $totalSecondsLeft, $this->intervalSeconds),
-                    $totalRemain,
-                );
+                $streamActive = $this->sumActive(array_keys($streamTypes[$s]));   // Active (sold)
+                $streamIds    = array_keys($streamTypes[$s]);
+                $openSlots = 0;
+                foreach ($streamIds as $id) { $openSlots += $this->types[$id]->qty; } // Free (open, unsold)
+                $n           = $streamActive + $openSlots;                       // ALREADY RELEASED = Active + Free
+                $totalRemain = max(0.0, (float) $streamTarget[$s] - $n);         // stop once we have released target
+                // pace (Active+Free) toward the schedule at 4 horizons; each asks if N is at/ahead of where the
+                // schedule says it should be HORIZON seconds from now => 0 (brake) if ahead. MIN governs, so a glut on
+                // any horizon brakes; on-pace every horizon yields ~nominal.
+                $secLeft = max(1.0, $campaignSeconds - $now);
+                $rates = [];
+                foreach ([86400.0, 7.0 * 86400.0, 30.44 * 86400.0, $secLeft] as $w) {
+                    $horizon = min($w, $secLeft);
+                    $sched   = min((float) $streamTarget[$s], $streamTarget[$s] * (($now + $horizon) / $campaignSeconds));
+                    $owed    = max(0.0, $sched - $n);
+                    $rates[] = $horizon > 0.0 ? $owed / $horizon * $this->intervalSeconds : 0.0;
+                }
+                $pace = new Pacing($rates, $totalRemain, (float) $openSlots);   // stream total open damps the CHANCE
                 $ev = $algo->evaluate($pace, $capHeadroom, $slotTypes, $opControl);
 
                 if ($s === 'workhorse' && $i % $sampleEvery === 0) {

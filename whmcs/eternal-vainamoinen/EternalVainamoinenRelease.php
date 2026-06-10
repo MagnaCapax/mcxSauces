@@ -30,19 +30,21 @@ declare(strict_types=1);
  * one qty++, and publishes the returned odds. Each FACTOR is a method, composed incrementally, in a fixed
  * order: decide IF a drop happens first, then WHICH slot type last.
  *
- * 1. Rate (whether a drop fires this tick). dropProbability() uses THREE real-time scales (a Pacing): the
- *    DAILY rate is a FLOOR so the chance is never quite zero while the campaign runs; the MONTHLY (700/mo)
- *    and TOTAL (4900) needs pull the rate UP when behind (max, not min). The TOTAL is the hard end —
- *    totalRemaining <= 0 stops the campaign. Real-time (remaining/seconds_left × interval) so the cron
- *    cadence (30s, 5min) does not change the realized rate. factorAccountCap() bounds it;
- *    factorOperatorControl() applies the operator's live knob (0 = pause, <1 throttle, >1 boost), part of
- *    the PUBLISHED config so live tuning stays verifiable.
+ * 1. Rate (whether a drop fires this tick). dropProbability() takes the MIN over FOUR real-time windows (a
+ *    Pacing: day, week, month, campaign): each window's rate clears that window's schedule deficit of
+ *    (Active+Free) vs target, so the rate falls to 0 on ANY window already at/ahead of pace — the tightest
+ *    window brakes the drip. The TOTAL is the hard end — totalRemaining <= 0 stops the campaign. Real-time
+ *    (remaining/seconds_left × interval) so the cron cadence (30s, 5min) does not change the realized rate.
+ *    factorAccountCap() bounds it; factorOperatorControl() applies the operator's live knob (0 = pause,
+ *    <1 throttle, >1 boost), part of the PUBLISHED config so live tuning stays verifiable.
  *
  * 2. Selection (which slot type, only if a drop fired). weights() chains the weight factors:
- *    factorCapacity (max(0, free − N), the protection level), factorStockSuppression (released-but-unsold
- *    stock → 0, tying releases to actual claims), factorTierWeight, factorWithinTierBias, factorMultiplier.
- *    One slot type is picked by cumulative-weight selection. publishedOdds() returns the exact normalized
- *    weights — what the page shows IS what the code uses.
+ *    factorCapacity (max(0, free − N), the protection level), factorOverSupply (a smooth one-sided divider
+ *    on released-but-unsold OPEN slots — chance / (1 + (open − K)/D), hard 0 at a DYNAMIC ceiling min(MAX, free)
+ *    — so a SKU that is not selling accumulates open stock and self-curbs, with no per-SKU tuning, and open
+ *    can never exceed true free capacity), factorTierWeight,
+ *    factorWithinTierBias, factorMultiplier. One slot type is picked by cumulative-weight selection.
+ *    publishedOdds() returns the exact normalized weights — what the page shows IS what the code uses.
  *
  * Rare / premium drops are simply a second stream of slot types: the caller runs decide() once per stream
  * and applies at most one release per tick.
@@ -92,6 +94,20 @@ final class EternalVainamoinenRelease
     // The factor* methods are the individual ingredients of each stage — read them after evaluate(). And
     // publishedOdds() is exactly what Stage 2 enforces, so "the page shows this" is literally true.
     // ────────────────────────────────────────────────────────────────────────────────────────────
+    // Over-supply curb tunables (factorOverSupply) — a single static curve on OPEN unsold slots; the sales
+    // feedback loop (open accumulates only when not selling) makes one curve adapt per-SKU with no per-plan
+    // figures. Operator calibration 2026-06-08 ("open=5 → ÷1.2, absolutely zero at 15"):
+    private const OVERSUPPLY_K   = 3.0;    // no curb at/below this many open slots (shopfront buffer)
+    private const OVERSUPPLY_D   = 10.0;   // divider slope: weight ÷ (1 + (open − K)/D) above K
+    private const OVERSUPPLY_MAX = 15.0;   // marketing upper bound; the LIVE hard 0 is min(this, free) — see factorOverSupply
+
+    // Stage-1 over-supply on the CHANCE: the SAME divider shape, applied to the per-tick drop probability using the
+    // STREAM's total available open. Lots already sitting available => fewer (or no) NEW drops, regardless of the time
+    // schedule — so a slow-sales stretch does not keep piling unsold inventory just to track the campaign clock.
+    private const CHANCE_OVERSUPPLY_K   = 5.0;    // stream total open below which the rate is NOT curbed (buffer)
+    private const CHANCE_OVERSUPPLY_D   = 10.0;   // rate divider slope: chance ÷ (1 + (totalOpen − K)/D) above K
+    private const CHANCE_OVERSUPPLY_MAX = 60.0;   // stream total open at/above which NO drop fires at all (hard 0)
+
     /** @var callable():float Inject a seeded RNG for reproducible / publicly-auditable draws. */
     private $rng;
 
@@ -152,13 +168,33 @@ final class EternalVainamoinenRelease
         return $w;
     }
 
-    /** Released-but-unsold stock suppresses the type (claims are the bottleneck — don't pile up inventory). */
-    private function factorStockSuppression(array $w, array $types): array
+    /**
+     * Over-supply curb: a smooth one-sided divider on released-but-unsold OPEN stock. As open inventory
+     * grows past OVERSUPPLY_K it divides the weight by 1 + (open − K)/D, reaching a hard 0 at a DYNAMIC
+     * ceiling = min(OVERSUPPLY_MAX, free). Because open stock only ACCUMULATES when releases outpace claims,
+     * this self-curbs a SKU that is not selling (open piles up → weight falls) while a strong seller never
+     * accumulates open (no curb) — a single static curve yields per-SKU-adaptive behaviour with NO per-SKU
+     * tuning. One-sided by design: below K there is NO ramp, so it only ever curbs over-supply, never boosts
+     * scarcity (that would dilute "emphasize strong selling"). K=3/D=10/MAX=15: open=5 → ÷1.2 (operator calibration).
+     *
+     * LOAD-BEARING SAFETY — DO NOT REMOVE THE min(.., free): the hard ceiling is the SKU's LIVE true free
+     * capacity, not a static number. `free` is recomputed from the shared pool every tick and EXCLUDES
+     * released-but-unsold open; if open were allowed past free, claims on that overhang would breach the
+     * shared-pool reserve. This is the safety property the OLD binary stock suppression silently held —
+     * removing it reintroduces reserve breaches (simulator constrained scenario: 0 → 7265 breaches). The
+     * static OVERSUPPLY_MAX is only the marketing upper bound when capacity is ample; `free` binds when tight.
+     */
+    private function factorOverSupply(array $w, array $types): array
     {
         foreach ($types as $id => $t) {
-            if ($t->stock >= $t->stockThreshold) {
-                $w[$id] = 0.0;
+            $open    = (float) $t->stock;
+            $ceiling = min((float) self::OVERSUPPLY_MAX, (float) $t->free);   // dynamic: static cap OR true free capacity
+            if ($open >= $ceiling) {
+                $w[$id] = 0.0;                                                // at/over true capacity → stop releasing
+                continue;
             }
+            $excess = max(0.0, $open - self::OVERSUPPLY_K);                   // no curb below K
+            $w[$id] /= 1.0 + $excess / self::OVERSUPPLY_D;
         }
         return $w;
     }
@@ -190,18 +226,29 @@ final class EternalVainamoinenRelease
     // ───────── composition: rate first (whether), weights last (which) ─────────
 
     /**
-     * Stage 1 — does a drop fire this tick?  p = min over rate methods.
-     * @param array<int,array{0:float,1:float}> $horizons each [remainingActive, secondsLeft] (short/month/campaign)
+     * Stage 1 — does a drop fire this tick?  chance = nominal × mean over the four time-scales of an S-curve
+     * multiplier of that scale's FILL. Each scale eases the rate DOWN when it is full (mult -> SCURVE_LOW, never 0)
+     * and ramps it UP when empty (mult -> SCURVE_HIGH). No single scale dominates (equal-weight mean). The campaign
+     * total is conserved by the fill-vs-target anchor: as released -> target, fill -> 1, mult -> SCURVE_LOW.
      */
     public function dropProbability(Pacing $pace, float $capHeadroomRate, float $operatorControl = 1.0): float
     {
         if ($pace->totalRemaining <= 0.0) {
-            return 0.0;                                                       // campaign target reached — hard stop
+            return 0.0;                                                       // already released the whole target — stop
         }
-        // The MONTHLY and TOTAL needs pull the rate UP when behind; the DAILY rate is a FLOOR so the chance is
-        // never quite zero while the campaign runs. Then the account cap bounds it and the operator knob scales it.
-        $paced = max($pace->dailyFloor, $pace->monthlyNeed, $pace->totalNeed);
+        if ($pace->totalOpen >= self::CHANCE_OVERSUPPLY_MAX) {
+            return 0.0;                                                       // too many already available — no drop at all
+        }
+        // Tightest temporal window governs: the per-tick release chance is the MIN over the four windows' needed
+        // rates. Each window's rate is 0 once (Active+Free) is at/ahead of that window's schedule, so a glut on ANY
+        // window brakes the drip. No floor, no S-curve — the chance can and should fall to 0 when already-released
+        // is ahead of pace.
+        $paced = $pace->rates ? min($pace->rates) : 0.0;
         $paced = min($paced, $this->factorAccountCap($capHeadroomRate));
+        // Over-supply on the CHANCE (same divider shape as factorOverSupply, Stage 2): the stream's total available
+        // open damps the per-tick rate, so a stream that has piled up unsold inventory slows its NEW releases even
+        // when the time schedule would push them — independent of, and stacking with, the (Active+Free) temporal brake.
+        $paced /= 1.0 + max(0.0, $pace->totalOpen - self::CHANCE_OVERSUPPLY_K) / self::CHANCE_OVERSUPPLY_D;
         return $this->factorOperatorControl(min(1.0, max(0.0, $paced)), $operatorControl);
     }
 
@@ -210,7 +257,7 @@ final class EternalVainamoinenRelease
     {
         $w = array_fill_keys(array_keys($types), 0.0);
         $w = $this->factorCapacity($w, $types);
-        $w = $this->factorStockSuppression($w, $types);
+        $w = $this->factorOverSupply($w, $types);
         $w = $this->factorTierWeight($w, $types);
         $w = $this->factorWithinTierBias($w, $types);
         $w = $this->factorMultiplier($w, $types);
@@ -271,17 +318,18 @@ final class EternalVainamoinenRelease
 }
 
 /**
- * The three real-time pacing scales for one stream. The caller builds this each tick from the clock + net-active
- * counts (use EternalVainamoinenRelease::rate() for each need). dailyFloor is the never-zero minimum; monthlyNeed
- * and totalNeed pull the rate up when behind; totalRemaining <= 0 ends the campaign (the 4900 hard stop).
+ * The pacing input for one stream/tick. `nominal` is the plan's own average per-tick pace (target × interval /
+ * campaign_seconds), so pacing is plan-relative — NOT a static rate shared across plans. `fills` are the four
+ * time-scale fill ratios [day, week, month, total], each released_in_window / window_target (clamp 0..1): they drive
+ * the S-curve down when a scale is full and up when empty. totalRemaining <= 0 ends the campaign (the hard stop).
  */
 final class Pacing
 {
+    /** @param float[] $rates per-window release rates [day, week, month, campaign] to clear the (Active+Free) deficit */
     public function __construct(
-        public float $dailyFloor,      // steady minimum rate (~ monthlyTarget / 30.44 days, per tick)
-        public float $monthlyNeed,     // rate() of this month's remaining / seconds left this month
-        public float $totalNeed,       // rate() of campaign remaining / seconds left in campaign
-        public float $totalRemaining,  // campaign net-active still owed; <= 0 => hard stop
+        public array $rates,           // per-window needed rate; min() governs (the tightest window brakes the drip)
+        public float $totalRemaining,  // target − (Active+Free); <= 0 => already released the whole target => stop
+        public float $totalOpen = 0.0, // stream's total available (open, unsold) — damps the CHANCE (see dropProbability)
     ) {}
 }
 
@@ -292,8 +340,7 @@ final class SlotType
         public string $id,            // WHMCS PID (opaque)
         public int $free,             // free slots derived from the SHARED tier pool (caller computes => interplay)
         public int $setAsideN,        // protection level held back for normal full-price sales
-        public int $stock,            // released-but-unsold qty
-        public int $stockThreshold,   // suppress once unsold stock reaches this
+        public int $stock,            // released-but-unsold OPEN qty (drives factorOverSupply curb)
         public float $tierWeight,     // storage tiers heavier
         public float $withinTierBias, // storage SKU > seedbox SKU within a tier
         public float $multiplier,     // per-slot-type knob

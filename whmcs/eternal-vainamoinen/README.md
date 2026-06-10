@@ -22,7 +22,7 @@ customers and AI agents can read it and check the published odds against the dro
 ## Run it (= verify it)
 
 ```bash
-php EternalVainamoinenReleaseTest.php     # → ALL 10 TESTS PASSED
+php EternalVainamoinenReleaseTest.php     # → ALL 17 TESTS PASSED
 php sim-scenarios.php                      # → full multi-scenario simulation report
 ```
 
@@ -39,15 +39,18 @@ The simulator demonstrates the three things that matter:
 
 Call `evaluate()` once per "stream" per tick. It runs, in order:
 
-1. **Rate** (`dropProbability`) — *does* a drop fire this tick? A real-time pace toward the target across three
-   horizons: a daily **floor** that keeps the chance never-quite-zero, plus monthly and total needs that pull
-   the rate **up** when behind (combined by `max`). Bounded by an account cap and a live operator knob
-   (`0` = pause, `<1` throttle, `>1` boost) — and that knob is part of the published config, so live tuning
-   stays verifiable.
+1. **Rate** (`dropProbability`) — *does* a drop fire this tick? A real-time pace toward the target across **four**
+   horizons (day, week, month, full campaign): each horizon's needed rate clears that window's schedule deficit of
+   already-released (sold + open) vs target, and the engine takes the **min** — the tightest window governs, so the
+   rate falls to 0 once already-released is at/ahead of pace on *any* window (it brakes when ahead; no floor). Then an
+   **over-supply divider on the stream's total open inventory** damps the chance further — a stream that has piled up
+   unsold stock slows its new releases, hard-zeroing once too much is already available. Bounded by an account cap and a
+   live operator knob (`0` = pause, `<1` throttle, `>1` boost), part of the published config so live tuning stays verifiable.
 2. **Selection** (`weights` → `pickByWeight`) — *which* type, only if a drop fired? Weighted by available
-   capacity (`free − reserve`, the classic protection level), zeroed if unsold stock is piling up, then scaled
-   by per-tier and per-SKU biases. `publishedOdds()` returns exactly these normalized weights — what a page
-   displays *is* what the code uses.
+   capacity (`free − reserve`, the classic protection level), then an **over-supply divider on each type's open
+   stock** — a smooth curve that damps a type as its unsold inventory grows and hard-zeros at `min(cap, free)`, so
+   released-but-unsold can never exceed true capacity — then scaled by per-tier and per-SKU biases. `publishedOdds()`
+   returns exactly these normalized weights — what a page displays *is* what the code uses.
 
 For provably-fair draws, inject a seeded / commit-reveal RNG via the constructor (the default `mt_rand` is
 convenient, not auditable).
