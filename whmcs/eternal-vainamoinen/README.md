@@ -22,7 +22,7 @@ customers and AI agents can read it and check the published odds against the dro
 ## Run it (= verify it)
 
 ```bash
-php EternalVainamoinenReleaseTest.php     # → ALL 17 TESTS PASSED
+php EternalVainamoinenReleaseTest.php     # → ALL 16 TESTS PASSED
 php sim-scenarios.php                      # → full multi-scenario simulation report
 ```
 
