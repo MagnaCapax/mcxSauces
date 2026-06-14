@@ -39,13 +39,14 @@ The simulator demonstrates the three things that matter:
 
 Call `evaluate()` once per "stream" per tick. It runs, in order:
 
-1. **Rate** (`dropProbability`) — *does* a drop fire this tick? A real-time pace toward the target across **four**
-   horizons (day, week, month, full campaign): each horizon's needed rate clears that window's schedule deficit of
-   already-released (sold + open) vs target, and the engine takes the **min** — the tightest window governs, so the
-   rate falls to 0 once already-released is at/ahead of pace on *any* window (it brakes when ahead; no floor). Then an
-   **over-supply divider on the stream's total open inventory** damps the chance further — a stream that has piled up
-   unsold stock slows its new releases, hard-zeroing once too much is already available. Bounded by an account cap and a
-   live operator knob (`0` = pause, `<1` throttle, `>1` boost), part of the published config so live tuning stays verifiable.
+1. **Rate** (`dropProbability`) — *does* a drop fire this tick? Purely a pacing question: a real-time pace toward the
+   target across **four** horizons (day, week, month, full campaign): each horizon's needed rate clears that window's
+   schedule deficit of already-released (sold + open) vs target, and the engine takes the **min** — the tightest window
+   governs, so the rate falls to 0 once already-released is at/ahead of pace on *any* window (it brakes when ahead; no
+   floor), and otherwise just draws the campaign toward the mean. **Over-supply is deliberately NOT in the rate** — it is
+   a Selection (which-type) concern only (step 2); putting it in the rate would let a few unsold slots of one type
+   strangle the whole stream's drip. Bounded by an account cap and a live operator knob (`0` = pause, `<1` throttle,
+   `>1` boost), part of the published config so live tuning stays verifiable.
 2. **Selection** (`weights` → `pickByWeight`) — *which* type, only if a drop fired? Weighted by available
    capacity (`free − reserve`, the classic protection level), then an **over-supply divider on each type's open
    stock** — a smooth curve that damps a type as its unsold inventory grows and hard-zeros at `min(cap, free)`, so

@@ -101,12 +101,10 @@ final class EternalVainamoinenRelease
     private const OVERSUPPLY_D   = 10.0;   // divider slope: weight ÷ (1 + (open − K)/D) above K
     private const OVERSUPPLY_MAX = 15.0;   // marketing upper bound; the LIVE hard 0 is min(this, free) — see factorOverSupply
 
-    // Stage-1 over-supply on the CHANCE: the SAME divider shape, applied to the per-tick drop probability using the
-    // STREAM's total available open. Lots already sitting available => fewer (or no) NEW drops, regardless of the time
-    // schedule — so a slow-sales stretch does not keep piling unsold inventory just to track the campaign clock.
-    private const CHANCE_OVERSUPPLY_K   = 5.0;    // stream total open below which the rate is NOT curbed (buffer)
-    private const CHANCE_OVERSUPPLY_D   = 10.0;   // rate divider slope: chance ÷ (1 + (totalOpen − K)/D) above K
-    private const CHANCE_OVERSUPPLY_MAX = 60.0;   // stream total open at/above which NO drop fires at all (hard 0)
+    // (Removed 2026-06-14) The Stage-1 over-supply-on-the-CHANCE divider/hard-stop was deleted: over-supply is a
+    // STAGE-2 (which-SKU) concern only (factorOverSupply). The RATE just paces to the mean; jamming over-supply into
+    // the rate strangled the drip (~5/day vs the ~23/day mean) for a handful of unsold slots. Pacing->totalOpen is
+    // retained as an accepted-but-unused field so the caller's Pacing construction stays source-compatible.
 
     /** @var callable():float Inject a seeded RNG for reproducible / publicly-auditable draws. */
     private $rng;
@@ -226,29 +224,22 @@ final class EternalVainamoinenRelease
     // ───────── composition: rate first (whether), weights last (which) ─────────
 
     /**
-     * Stage 1 — does a drop fire this tick?  chance = nominal × mean over the four time-scales of an S-curve
-     * multiplier of that scale's FILL. Each scale eases the rate DOWN when it is full (mult -> SCURVE_LOW, never 0)
-     * and ramps it UP when empty (mult -> SCURVE_HIGH). No single scale dominates (equal-weight mean). The campaign
-     * total is conserved by the fill-vs-target anchor: as released -> target, fill -> 1, mult -> SCURVE_LOW.
+     * Stage 1 — does a drop fire this tick? Purely a RATE question: pace toward the mean (target/campaign), checked
+     * at four windows (day / 7-day / month / campaign); the MIN governs, so the drip brakes (rate 0) once
+     * (Active+Free) is at/ahead of ANY window's schedule, and otherwise paces to the mean. NOTHING about over-supply
+     * lives here — over-supply is a STAGE-2 (which-SKU) concern (factorOverSupply), not a rate concern. Keeping the
+     * rate clean is the point: it just draws the campaign toward the mean (e.g. 700/month) and catches up when behind.
      */
     public function dropProbability(Pacing $pace, float $capHeadroomRate, float $operatorControl = 1.0): float
     {
         if ($pace->totalRemaining <= 0.0) {
             return 0.0;                                                       // already released the whole target — stop
         }
-        if ($pace->totalOpen >= self::CHANCE_OVERSUPPLY_MAX) {
-            return 0.0;                                                       // too many already available — no drop at all
-        }
         // Tightest temporal window governs: the per-tick release chance is the MIN over the four windows' needed
         // rates. Each window's rate is 0 once (Active+Free) is at/ahead of that window's schedule, so a glut on ANY
-        // window brakes the drip. No floor, no S-curve — the chance can and should fall to 0 when already-released
-        // is ahead of pace.
+        // window brakes the drip. No floor — the chance can and should fall to 0 when already-released is ahead of pace.
         $paced = $pace->rates ? min($pace->rates) : 0.0;
         $paced = min($paced, $this->factorAccountCap($capHeadroomRate));
-        // Over-supply on the CHANCE (same divider shape as factorOverSupply, Stage 2): the stream's total available
-        // open damps the per-tick rate, so a stream that has piled up unsold inventory slows its NEW releases even
-        // when the time schedule would push them — independent of, and stacking with, the (Active+Free) temporal brake.
-        $paced /= 1.0 + max(0.0, $pace->totalOpen - self::CHANCE_OVERSUPPLY_K) / self::CHANCE_OVERSUPPLY_D;
         return $this->factorOperatorControl(min(1.0, max(0.0, $paced)), $operatorControl);
     }
 

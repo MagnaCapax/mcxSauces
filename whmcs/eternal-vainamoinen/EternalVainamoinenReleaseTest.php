@@ -33,13 +33,11 @@ $check($e->dropProbability(new Pacing([0.5, 0.0, 0.5, 0.5], 100.0), 1.0, 1.0) ==
 $check(abs($e->dropProbability(new Pacing([1.0, 1.0, 1.0, 1.0], 100.0), 0.1, 1.0) - 0.1) < 1e-9,
     'account cap bounds the rate');
 
-// --- Stage 1: over-supply on the CHANCE — stream total open damps the per-tick rate (same divider shape) ---
-$check(abs($e->dropProbability(new Pacing([0.5, 0.5, 0.5, 0.5], 100.0, 5.0), 1.0, 1.0) - 0.5) < 1e-9,
-    'totalOpen at/below CHANCE_K (5) => no rate curb (chance unchanged 0.5)');
-$check(abs($e->dropProbability(new Pacing([0.5, 0.5, 0.5, 0.5], 100.0, 25.0), 1.0, 1.0) - (0.5 / 3.0)) < 1e-9,
-    'totalOpen 25 => chance / (1 + (25-5)/10) = 0.5/3 (over-supply rate divider)');
-$check($e->dropProbability(new Pacing([0.5, 0.5, 0.5, 0.5], 100.0, 60.0), 1.0, 1.0) === 0.0,
-    'totalOpen 60 >= CHANCE_MAX => NO drop at all (hard 0)');
+// --- Stage 1: the RATE is independent of over-supply — over-supply is a STAGE-2 (which-SKU) concern only ---
+$check(abs($e->dropProbability(new Pacing([0.5, 0.5, 0.5, 0.5], 100.0, 25.0), 1.0, 1.0) - 0.5) < 1e-9,
+    'totalOpen does NOT damp the rate (25 open => chance still 0.5) — over-supply lives in Stage 2, not the rate');
+$check(abs($e->dropProbability(new Pacing([0.5, 0.5, 0.5, 0.5], 100.0, 999.0), 1.0, 1.0) - 0.5) < 1e-9,
+    'even a huge open glut does NOT zero the rate — Stage 2 weights stop releasing an over-supplied SKU');
 
 // --- Stage 2: selection weights (free-N protection level + over-supply open-slot curb) ---
 $types = [
