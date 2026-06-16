@@ -185,7 +185,7 @@ discover_topology() {
         # Parse adapter list: lines matching index + SAS type
         local adapter_indices
         adapter_indices="$(timeout "$SAS2IRCU_TIMEOUT" "$bin" list 2>/dev/null \
-            | awk '/^\s+[0-9]+\s+SAS/ { print $1 }')" || true
+            | awk '/^[ \t]*[0-9]+[ \t]+SAS/ { print $1 }')" || true
 
         if [[ -z "$adapter_indices" ]]; then
             warn "No adapters found via $binname"
@@ -300,7 +300,7 @@ resolve_drive() {
 
     # Search cache for serial (case-insensitive)
     local match
-    match="$(awk -v ser="$serial" 'BEGIN{IGNORECASE=1} $4 == ser { print; exit }' "$CACHE_FILE")"
+    match="$(awk -v ser="$serial" 'toupper($4) == toupper(ser) { print; exit }' "$CACHE_FILE")"
 
     if [[ -n "$match" ]]; then
         echo "$match"
@@ -525,7 +525,7 @@ bulk_locate() {
             local serial
             serial="$(get_serial_for_device "$devname" 2>/dev/null)"
             [[ -z "$serial" ]] && continue
-            if ! awk -v ser="$serial" 'BEGIN{IGNORECASE=1} $4 == ser { found=1; exit } END { exit !found }' "$CACHE_FILE" 2>/dev/null; then
+            if ! awk -v ser="$serial" 'toupper($4) == toupper(ser) { found=1; exit } END { exit !found }' "$CACHE_FILE" 2>/dev/null; then
                 start_dd_blink "$devname" "$serial"
                 ((ahci_count++))
             fi
@@ -596,7 +596,7 @@ list_drives() {
         local serial
         serial="$(get_serial_for_device "$devname" 2>/dev/null)"
         [[ -z "$serial" ]] && continue
-        if ! awk -v ser="$serial" 'BEGIN{IGNORECASE=1} $4 == ser { found=1; exit } END { exit !found }' "$CACHE_FILE" 2>/dev/null; then
+        if ! awk -v ser="$serial" 'toupper($4) == toupper(ser) { found=1; exit } END { exit !found }' "$CACHE_FILE" 2>/dev/null; then
             local model_ahci size_ahci
             model_ahci="$(smartctl -i "$devname" 2>/dev/null | awk -F: '/Device Model/ { gsub(/^[ \t]+|[ \t]+$/, "", $2); print $2; exit }')"
             size_ahci="$(smartctl -i "$devname" 2>/dev/null | awk -F: '/User Capacity/ { gsub(/^[ \t]+|[ \t]+$/, "", $2); print $2; exit }')"
