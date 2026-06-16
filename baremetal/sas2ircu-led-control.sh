@@ -51,7 +51,7 @@ readonly VERSION="1.0.0"
 readonly CACHE_FILE="/tmp/sas2ircu-led-topology.cache"
 readonly CACHE_TTL=300  # seconds
 readonly BLINK_PID_DIR="/tmp/sas2ircu-led-blink-pids"
-readonly SAS2IRCU_TIMEOUT=5
+readonly SAS2IRCU_TIMEOUT=20  # `list` alone takes ~5s on multi-adapter/big-JBOD hosts (e.g. le4-0-103: 5 adapters, 5.1s); 5s was too tight and silently returned empty (-> "No adapters found")
 readonly DD_BLINK_SECONDS=3          # seconds of sustained read (LED solid) — TIME-bounded, not size-bounded
 readonly DD_CYCLE_SLEEP=3            # seconds of darkness
 
