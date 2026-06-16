@@ -52,7 +52,7 @@ readonly CACHE_FILE="/tmp/sas2ircu-led-topology.cache"
 readonly CACHE_TTL=300  # seconds
 readonly BLINK_PID_DIR="/tmp/sas2ircu-led-blink-pids"
 readonly SAS2IRCU_TIMEOUT=5
-readonly DD_BLOCK_COUNT=100  # dd bs=1M count=N — ~3 seconds of sustained read
+readonly DD_BLINK_SECONDS=3          # seconds of sustained read (LED solid) — TIME-bounded, not size-bounded
 readonly DD_CYCLE_SLEEP=3            # seconds of darkness
 
 # Discovered binaries (populated by find_binaries)
@@ -362,7 +362,10 @@ start_dd_blink() {
     # Start background blink loop
     (
         while true; do
-            dd if="$dev" bs=1M count="$DD_BLOCK_COUNT" iflag=direct of=/dev/null 2>/dev/null
+            # TIME-bounded read: LED stays solid for DD_BLINK_SECONDS regardless of drive
+            # throughput. A fixed byte count (count=N) finishes in <1s on a fast drive and
+            # the LED only blips — invisible. timeout keeps reading until the clock runs out.
+            timeout "$DD_BLINK_SECONDS" dd if="$dev" bs=4M iflag=direct of=/dev/null 2>/dev/null
             sleep "$DD_CYCLE_SLEEP"
         done
     ) &
