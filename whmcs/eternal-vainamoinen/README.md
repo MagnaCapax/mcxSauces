@@ -39,15 +39,14 @@ The simulator demonstrates the three things that matter:
 
 Call `evaluate()` once per "stream" per tick. It runs, in order:
 
-1. **Rate** (`dropProbability`) — *does* a drop fire this tick? Purely a pacing question: the rate **draws toward the
-   mean like gravity** — pace the *remaining* target over the *remaining* campaign time (`(target − already-released) /
-   time-left`). On the mean line the rate equals the mean (e.g. 700/month); behind, it rises above the mean; ahead, it
-   falls below — a restoring force proportional to the deviation, so the campaign converges to its target by the end. No
-   floor, no short-window braking, no convolutions. (The engine itself takes the **min** over whatever per-window rates
-   the caller supplies, so a caller *may* pass multiple horizons; the reference deployment passes the single mean rate.)
-   **Over-supply is deliberately NOT in the rate** — it is a Selection (which-type) concern only (step 2); putting it in
-   the rate would let a few unsold slots of one type strangle the whole stream's drip. Bounded by an account cap and a
-   live operator knob (`0` = pause, `<1` throttle, `>1` boost), part of the published config so live tuning stays verifiable.
+1. **Rate** (`dropProbability`) — *does* a drop fire this tick? Pace **N = already-released (Active sold + Free open)**
+   toward the schedule, checked at **four horizons** (day / 7-day / month / full campaign): each horizon's needed rate is
+   `max(0, scheduled-by-then − N) / horizon`, and the engine takes the **min** — so the rate falls to **0 (brake)** the
+   moment N is at/ahead of schedule on *any* horizon, and otherwise paces toward the target. **No floor** — being ahead
+   stops the drip, it does not idle at a minimum. Counting Free (open, unsold) inside N is what makes standing inventory
+   self-limit: as open piles up, N moves ahead of schedule and the rate brakes — so **over-supply needs no separate term
+   in the rate**; it falls out of the N-vs-schedule pacing. Bounded by an account cap and a live operator knob (`0` =
+   pause, `<1` throttle, `>1` boost), part of the published config so live tuning stays verifiable.
 2. **Selection** (`weights` → `pickByWeight`) — *which* type, only if a drop fired? Weighted by available
    capacity (`free − reserve`, the classic protection level), then an **over-supply divider on each type's open
    stock** — a smooth curve that damps a type as its unsold inventory grows and hard-zeros at `min(cap, free)`, so
