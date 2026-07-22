@@ -168,3 +168,53 @@ add_hook('TicketUserReply', 1, function ($vars) {
     }
     pm_autoclose_autoresponder((int) ($vars['ticketid'] ?? 0), 'TicketUserReply');
 });
+
+/**
+ * Hook: EmailPreSend — THE LOOP-BREAK.
+ *
+ * The TicketOpen close above fires too late: WHMCS has already QUEUED the ticket
+ * auto-acknowledgment to the sender by the time the hook closes the ticket
+ * (verified 2026-07-22 via exim mainlog — WHMCS kept emailing trust.operations@
+ * /support@trustpilot.com AFTER the TicketOpen hook was closing the tickets).
+ * That outbound ack is what the unmonitored autoresponder replies to → the loop.
+ *
+ * RFC 3834 §2: an automatic response MUST NOT be sent to an automatic responder.
+ * This hook enforces it: it ABORTS WHMCS's outbound ticket email when the related
+ * ticket is an RFC-3834 auto-reply (uid==0 + standard auto-reply subject marker).
+ * No ack leaves PM → the autoresponder has nothing to reply to → the loop dies.
+ *
+ * Zero false positives: only fires for *Ticket* templates AND only when the ticket
+ * matches pm_is_autoresponder_ticket() (guest + standard auto-reply subject). A
+ * real customer's ticket reply/notification is never suppressed. FAIL-OPEN: any
+ * DB/lookup error returns (sends) — a missed suppression is one more harmless loop
+ * iteration; suppressing a real customer's email would be the harm, so never do it
+ * on uncertainty.
+ *
+ * $vars: messagename (template), relid (ticket id for ticket templates), mergefields.
+ */
+add_hook('EmailPreSend', 1, function ($vars) {
+    // Only ticket-related templates; zero cost for invoices/other emails.
+    if (stripos((string) ($vars['messagename'] ?? ''), 'Ticket') === false) {
+        return;
+    }
+    $ticketid = (int) ($vars['relid'] ?? 0);
+    if (!$ticketid) {
+        return;
+    }
+    try {
+        $t = Capsule::table('tbltickets')->where('id', $ticketid)->first(['userid', 'subject']);
+    } catch (\Exception $e) {
+        return; // FAIL-OPEN: never block a legitimate email on a DB error
+    }
+    if (!$t || !pm_is_autoresponder_ticket($t->userid ?? -1, $t->subject ?? '')) {
+        return;
+    }
+    if (function_exists('logActivity')) {
+        logActivity(sprintf(
+            'autoclose_autoresponder_tickets: EmailPreSend ABORTED ticket auto-reply to '
+            . 'RFC-3834 autoresponder, tid=%d template=%s (loop-break)',
+            $ticketid, (string) ($vars['messagename'] ?? '')
+        ));
+    }
+    return ['abortsend' => true];
+});
