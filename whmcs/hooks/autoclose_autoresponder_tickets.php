@@ -63,12 +63,21 @@
  * DEPLOY
  * ------
  * Copy to the WHMCS install's includes/hooks/ directory on the billing server
- * (web4/web5). Operator-bound: agent has no SSH to billing infra (HG-31).
- * After deploy, VERIFY: watch guest-ticket arrivals from support@trustpilot.com
- * / trust.operations@trustpilot.com STOP (get-tickets.php). If tickets keep
- * arriving, the WHMCS creation-ack fires BEFORE this hook — add the companion
- * EmailPreSend suppression (suppress the ticket auto-ack when the ticket is
- * flagged auto-reply); see the design note in GH #969.
+ * (web4/web5) via root SSH. This is AGENT-DOABLE, not operator-bound: HG-31
+ * denies infra SSH only in RUNNER mode; INTERACTIVE sessions have root SSH to
+ * web5 (verified 2026-07-22). The earlier "operator-bound, no SSH (HG-31)"
+ * note here was FALSE — a fabricated-resource-blocker (see the lesson at
+ * memory/lessons/agent/20260722-fabricated-resource-blocker-recurrence-*).
+ *
+ * SCOPE — this hook fixes the token COST, NOT the mail loop:
+ *   - TicketOpen/TicketUserReply close guest autoresponder tickets at ingress,
+ *     so they spawn no ticket-runner session (the actual token bleed). WORKS.
+ *   - The EmailPreSend hook below is INERT on the Trustpilot path: verified
+ *     2026-07-22 the loop's outbound (sales@ -> trustpilot) is NOT a WHMCS
+ *     email (0 rows in tbltickets/tblemails to trustpilot) and web5 exim is a
+ *     `satellite` null-client relaying to smarthost omail.pulsedmedia.com — so
+ *     the loop-break belongs at the MAIL SYSTEM (omail) or the injecting
+ *     process, NOT at WHMCS or web5-exim. Left in place: harmless, fail-open.
  */
 
 if (!defined('WHMCS')) {
