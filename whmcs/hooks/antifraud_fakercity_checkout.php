@@ -112,7 +112,7 @@
  *
  * SPDX-License-Identifier: Apache-2.0
  *
- * @author    Aleksi Ursin <aleksi@magnacapax.fi>
+ * @author    Aleksi Ursin <123067457+MagnaCapax@users.noreply.github.com>
  * @copyright 2026 Magna Capax Finland Oy
  * @license   Apache-2.0
  */
