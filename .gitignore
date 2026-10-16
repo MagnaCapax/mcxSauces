@@ -1,0 +1,3 @@
+# Runtime logs written by the WHMCS hooks (e.g. whmcs/hooks/antifraud_fakercity_checkout.php
+# writes log/antifraud-checkout/YYYYMMDD.jsonl). Machine data about checkouts: never commit.
+/log/
