@@ -18,12 +18,14 @@ customers and AI agents can read it and check the published odds against the dro
 | `EternalVainamoinenReleaseTest.php` | Plain-PHP regression tests that lock the reviewed behaviour. The cheapest way to verify. |
 | `EternalVainamoinenSimulator.php` | A synthetic-data simulator that drives the engine the way the production cron does, over a full campaign, and asserts the invariants every tick. |
 | `sim-scenarios.php` | An example driver — 4 scenarios × 6 seeds, with a readable report. **Run this** to watch a full campaign. |
+| `verify-live-feed.php` | Checks the LIVE campaign feed against this engine: every limited product within its limit, its published maximum recomputed, its chance not above it. |
 
 ## Run it (= verify it)
 
 ```bash
 php EternalVainamoinenReleaseTest.php     # → ALL 49 TESTS PASSED
 php sim-scenarios.php                      # → full multi-scenario simulation report
+php verify-live-feed.php                   # → checks the live feed right now (exit 0 = every rule holds)
 ```
 
 The tests and the simulator show the things that matter:
@@ -94,7 +96,7 @@ The live feed is `https://pulsedmedia.com/data/v1/eternal-drops.json`, rewritten
 appended to `https://pulsedmedia.com/data/v1/eternal-drops-audit.jsonl`. In the feed, each limited product the drip
 paces carries `limit`, `claimed`, `pending`, `due` and `max_drop_chance_per_tick` next to `open_now` and
 `drop_chance_per_tick`. (A one-shot batch, with all its slots put on sale at once, is not in the drip feed; its
-page card shows Available and Claimed, and Available + Claimed never exceeds the limit.) For each one you can check:
+page card shows Available and Claimed, and Available + Claimed never exceeds the limit.) `php verify-live-feed.php` runs these checks for you; for each one you can also check by hand:
 
 - `claimed + pending + open_now <= limit`;
 - `max_drop_chance_per_tick == limitedRate(limit, claimed + pending, open_now, due − generated_at, tick_interval_seconds)`
