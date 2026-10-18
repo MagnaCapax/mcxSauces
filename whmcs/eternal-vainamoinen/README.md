@@ -61,19 +61,22 @@ by itself. Once Active + Free reaches the target the stream stops. Then:
 
 ### 1b. Limited releases — "Claimed: N of LIMIT"
 
-Some products are sold with a published limit. Each one is its own stream with a **due date**: its own date if it
-has one, otherwise the campaign end (2026-12-31). Its **maximum** rate is:
+Some products are sold with a published limit, shown on the page as "Claimed: N of LIMIT · due DATE". Each one is
+its own stream with that **due date**: the date shown, which is the product's own date or otherwise the campaign end
+(2026-12-31). Its **maximum** rate is:
 
 ```
-limitedRate = rate(limit − claimed − open, seconds to the due date, tick interval)
+limitedRate = rate(limit − taken − open, seconds to the due date, tick interval)     // taken = claimed + pending
 ```
 
 that is, everything that may still be released, spread evenly over the time left to the due date. *Claimed* counts
-every slot ever taken, including ones later cancelled — the same number the page shows. This maximum is also the
-ceiling (`Pacing::maxRate`): the buffer and the knob can slow a limited product, nothing can make it faster. At the
-limit the rate is 0, and `withinLimit()` (claimed + open < limit) is re-checked at the moment of release, so a sale
-that lands between the check and the release cannot push it over. If the published limits cannot be read, nothing
-is released.
+every slot ever taken, including ones later cancelled — the same number the page shows. *Pending* counts unpaid
+orders, each of which holds a slot until it is paid or cancelled. This maximum is also the ceiling
+(`Pacing::maxRate`): the buffer and the knob can slow a limited product, nothing can make it faster. At the limit the
+rate is 0, and `withinLimit()` (taken + open < limit) is re-checked at the moment of release, so a sale that lands
+between the check and the release cannot push it over. Every tick the cron also trims open stock back to
+`limit − taken` for every limited product, including one-shot batches that are not dripped, because a cancelled
+order hands its slot back to stock. If the published limits cannot be read, nothing is released.
 
 ### 2. Selection — which product, if a drop fired?
 
@@ -88,12 +91,13 @@ convenient, not auditable).
 ## Check the live campaign
 
 The live feed is `https://pulsedmedia.com/data/v1/eternal-drops.json`, rewritten every tick; every release is
-appended to `https://pulsedmedia.com/data/v1/eternal-drops-audit.jsonl`. In the feed, each limited product carries
-`limit`, `claimed`, `due` and `max_drop_chance_per_tick` next to `open_now` and `drop_chance_per_tick`. For each
-one you can check:
+appended to `https://pulsedmedia.com/data/v1/eternal-drops-audit.jsonl`. In the feed, each limited product the drip
+paces carries `limit`, `claimed`, `pending`, `due` and `max_drop_chance_per_tick` next to `open_now` and
+`drop_chance_per_tick`. (A one-shot batch, with all its slots put on sale at once, is not in the drip feed; its
+page card shows Available and Claimed, and Available + Claimed never exceeds the limit.) For each one you can check:
 
-- `claimed + open_now <= limit`;
-- `max_drop_chance_per_tick == limitedRate(limit, claimed, open_now, due − generated_at, tick_interval_seconds)`
+- `claimed + pending + open_now <= limit`;
+- `max_drop_chance_per_tick == limitedRate(limit, claimed + pending, open_now, due − generated_at, tick_interval_seconds)`
   (to rounding);
 - `drop_chance_per_tick <= max_drop_chance_per_tick`.
 
