@@ -7,14 +7,15 @@ declare(strict_types=1);
  * WHY THIS EXISTS
  * ---------------
  * Validates the release engine over a FULL campaign without any internal DB values, exercising the parts the
- * pure engine cannot self-enforce. v2 (2026-06-01) fixes two improprieties in v1 and adds real telemetry:
- *   - PROPER three-scale pacing: distinct DAILY floor, MONTHLY need (reset each month), and TOTAL need, so the
- *     max() catch-up behaviour is actually exercised (v1 collapsed monthly≈total — it never tested catch-up).
- *   - REAL two-stream design: workhorse + rare are paced as SEPARATE streams (rare priority, ≤1 release/tick),
- *     so even rare-spread is validated as built (v1 ran a single stream — rare-via-multiplier was never the design).
- *   - RICH telemetry: convergence per month, reserve margin per group, per-SKU free/unsold/floor trajectories,
- *     an empirical PUBLISHED == ENFORCED check (realized drop share vs the odds the engine published), and the
- *     rare inter-drop spread.
+ * pure engine cannot self-enforce. It drives the engine the way the production cron does:
+ *   - Workhorse stream: ONE mean rate per tick, rate(target − (Active+Free), seconds left, interval), damped by the
+ *     GLOBAL open governor (total unsold across every SKU) — the same Pacing the cron builds.
+ *   - Limited stream: a SKU with a published limit ("Claimed: N of LIMIT") sold by a due date (here the campaign
+ *     end). Its rate is limitedRate(limit, claimed, open, time to due) and is also the Pacing ceiling; withinLimit()
+ *     is re-checked before every release. Limited first, at most one release per tick across both.
+ *   - Telemetry: convergence per month, reserve margin per group, per-SKU free/unsold trajectories, an empirical
+ *     PUBLISHED == ENFORCED check (realized drop share vs the odds the engine published), and the limited SKU's
+ *     release spread and peak claimed + open (which must never pass its limit).
  *
  * It models the SHARED-POOL interplay (several SKUs draw free slots from one physical pool) and asserts the
  * invariants every tick: reserve never breached, pool never over-allocated. Inputs are synthetic groups/types;
@@ -45,7 +46,7 @@ final class SimType
     public function __construct(
         public string $id,
         public string $group,
-        public string $stream,        // 'workhorse' | 'rare'  (rare = own paced stream for even spread)
+        public string $stream,        // 'workhorse' | 'limited'  (limited = published limit, paced to its due date)
         public float $sizeTiB,        // storage each claimed slot consumes from the group pool
         public float $tierWeight,
         public float $withinTierBias,
@@ -67,7 +68,7 @@ final class EternalVainamoinenSimulator
      * @param array<string,SimGroup> $groups
      * @param array<string,SimType>  $types
      * @param callable():float       $rng
-     * @param array{rareTotal?:int,capHeadroom?:float,pauseFrom?:float,pauseTo?:float,sampleEvery?:int} $opts
+     * @param array{limit?:int,capHeadroom?:float,pauseFrom?:float,pauseTo?:float,sampleEvery?:int} $opts
      */
     public function __construct(
         private array $groups,
@@ -84,7 +85,7 @@ final class EternalVainamoinenSimulator
         // ── HOW ONE TICK WORKS (a tick = one cron run) ────────────────────────────────────────────
         // Each pass of the main loop below does four things, in order:
         //   1. Locate this tick in time — which campaign month, and seconds left in the month and campaign.
-        //   2. For each stream (rare first, so it wins ties), rebuild every SKU's free-slot count from its
+        //   2. For each stream (limited first, so it wins ties), rebuild every SKU's free-slot count from its
         //      SHARED group pool, then ask the engine: drop this tick? which SKU? At most ONE release/tick.
         //   3. Synthetic demand — some released-but-unsold slots get claimed; each claim consumes the shared
         //      pool (this is what makes a group's SKUs compete for the same physical space).
@@ -97,16 +98,17 @@ final class EternalVainamoinenSimulator
         $campaignSeconds = SIM_MONTH_SECONDS * $this->campaignMonths;
         $totalTarget     = $this->monthlyTarget * $this->campaignMonths;
         $ticks           = (int) floor($campaignSeconds / $this->intervalSeconds);
-        $rareTotal       = (int) ($this->opts['rareTotal'] ?? 0);
+        $limit           = (int) ($this->opts['limit'] ?? 0);    // the limited SKU's published limit (due = campaign end)
         $capHeadroom     = (float) ($this->opts['capHeadroom'] ?? 1.0);
         $pauseFrom       = (float) ($this->opts['pauseFrom'] ?? -1.0);   // operator-control pause window (seconds)
         $pauseTo         = (float) ($this->opts['pauseTo'] ?? -1.0);
         $sampleEvery     = (int) ($this->opts['sampleEvery'] ?? 250);
 
-        // split types into streams; rare evaluated first (priority), ≤ 1 release/tick total
-        $streamTypes = ['rare' => [], 'workhorse' => []];
+        // split types into streams; limited evaluated first (priority), ≤ 1 release/tick total
+        $streamTypes = ['limited' => [], 'workhorse' => []];
         foreach ($this->types as $id => $t) { $streamTypes[$t->stream][$id] = $t; }
-        $streamTarget = ['rare' => $rareTotal, 'workhorse' => $totalTarget - $rareTotal];
+        $streamTarget = ['limited' => $limit, 'workhorse' => $totalTarget - $limit];
+        $peakLimited  = 0;                                  // highest claimed + open seen on the limited SKU
 
         $ids = array_keys($this->types);
         $released      = array_fill_keys($ids, 0);
@@ -121,7 +123,7 @@ final class EternalVainamoinenSimulator
         $whDrops = 0; $whSumOdds = array_fill_keys(array_keys($streamTypes['workhorse']), 0.0);
 
         $reserveBreaches = 0; $overAlloc = 0; $dropsTotal = 0;
-        $activeAtMonthStart = ['rare' => 0, 'workhorse' => 0];
+        $activeAtMonthStart = ['limited' => 0, 'workhorse' => 0];
         $monthEndActive = [];        // monthIndex => cumulative active at month end
         $weeklyDrops = [];           // weekIndex => drops
         $probSeries  = [];           // [tickFraction, p_workhorse] samples
@@ -136,7 +138,7 @@ final class EternalVainamoinenSimulator
             $monthIndex = (int) floor($now / SIM_MONTH_SECONDS);
             if ($monthIndex > $lastMonth) {
                 $monthEndActive[$lastMonth] = $totalActive;
-                foreach (['rare', 'workhorse'] as $s) {
+                foreach (['limited', 'workhorse'] as $s) {
                     $activeAtMonthStart[$s] = $this->sumActive(array_keys($streamTypes[$s]));
                 }
                 $lastMonth = $monthIndex;
@@ -147,9 +149,11 @@ final class EternalVainamoinenSimulator
             // operator-control knob: 0 during a pause window, else 1
             $opControl = ($pauseFrom >= 0.0 && $now >= $pauseFrom && $now < $pauseTo) ? 0.0 : 1.0;
 
-            // ── 2. per stream (rare first = priority): rebuild free from the shared pool, ask the engine, release ≤1 ──
+            // ── 2. per stream (limited first = priority): rebuild free from the shared pool, ask the engine, release ≤1 ──
             $releasedThisTick = false;
-            foreach (['rare', 'workhorse'] as $s) {            // rare first => priority
+            $globalOpen = 0;
+            foreach ($this->types as $t) { $globalOpen += $t->qty; }       // GLOBAL open drives the buffer governor
+            foreach (['limited', 'workhorse'] as $s) {         // limited first => priority
                 if ($releasedThisTick || !$streamTypes[$s]) { continue; }
 
                 $slotTypes = [];
@@ -171,19 +175,21 @@ final class EternalVainamoinenSimulator
                 foreach ($streamIds as $id) { $openSlots += $this->types[$id]->qty; } // Free (open, unsold)
                 $n           = $streamActive + $openSlots;                       // ALREADY RELEASED = Active + Free
                 $totalRemain = max(0.0, (float) $streamTarget[$s] - $n);         // stop once we have released target
-                // pace (Active+Free) toward the schedule at 4 horizons; each asks if N is at/ahead of where the
-                // schedule says it should be HORIZON seconds from now => 0 (brake) if ahead. MIN governs, so a glut on
-                // any horizon brakes; on-pace every horizon yields ~nominal.
-                $secLeft = max(1.0, $campaignSeconds - $now);
-                $rates = [];
-                foreach ([86400.0, 7.0 * 86400.0, 30.44 * 86400.0, $secLeft] as $w) {
-                    $horizon = min($w, $secLeft);
-                    $sched   = min((float) $streamTarget[$s], $streamTarget[$s] * (($now + $horizon) / $campaignSeconds));
-                    $owed    = max(0.0, $sched - $n);
-                    $rates[] = $horizon > 0.0 ? $owed / $horizon * $this->intervalSeconds : 0.0;
+                $secLeft     = max(1.0, $campaignSeconds - $now);
+                if ($s === 'limited') {
+                    // the cron's limited pacing: limit − claimed − open spread to the due date; also the ceiling
+                    $r    = EternalVainamoinenRelease::limitedRate($limit, $streamActive, $openSlots, $secLeft, (float) $this->intervalSeconds);
+                    $pace = new Pacing([$r], $totalRemain, (float) $globalOpen, $r);
+                } else {
+                    // the cron's stream pacing: one mean rate, remaining over the time left
+                    $r    = EternalVainamoinenRelease::rate($totalRemain, $secLeft, (float) $this->intervalSeconds);
+                    $pace = new Pacing([$r], $totalRemain, (float) $globalOpen);
                 }
-                $pace = new Pacing($rates, $totalRemain, (float) $openSlots);   // stream total open damps the CHANCE
                 $ev = $algo->evaluate($pace, $capHeadroom, $slotTypes, $opControl);
+                if ($s === 'limited' && $ev->chosenTypeId !== null
+                    && !EternalVainamoinenRelease::withinLimit($limit, $streamActive, $openSlots)) {
+                    continue;                                                       // hard stop at the release itself
+                }
 
                 if ($s === 'workhorse' && $i % $sampleEvery === 0) {
                     $probSeries[] = [round($now / $campaignSeconds, 4), round($ev->dropProbability, 5)];
@@ -191,6 +197,7 @@ final class EternalVainamoinenSimulator
                 if ($ev->chosenTypeId !== null) {
                     $cid = $ev->chosenTypeId;
                     $this->types[$cid]->qty++;
+                    if ($s === 'limited') { $peakLimited = max($peakLimited, $streamActive + $openSlots + 1); }
                     $released[$cid]++;
                     if ($this->types[$cid]->qty > $maxUnsold[$cid]) { $maxUnsold[$cid] = $this->types[$cid]->qty; }
                     $dropTicks[$cid][] = $i;
@@ -252,7 +259,8 @@ final class EternalVainamoinenSimulator
             'published_expected'=> $publishedExpected,       // avg published odds at drop (workhorse)
             'realized_share'    => $realizedShare,           // realized drop share (workhorse)
             'published_enforced_max_gap' => $maxOddsGap,     // |expected − realized| max; ~0 proves published == enforced
-            'rare_drop_ticks'   => array_values(array_filter($dropTicks, fn ($d, $id) => $this->types[$id]->stream === 'rare', ARRAY_FILTER_USE_BOTH)),
+            'limited_drop_ticks' => array_values(array_filter($dropTicks, fn ($d, $id) => $this->types[$id]->stream === 'limited', ARRAY_FILTER_USE_BOTH)),
+            'limited_peak'      => $peakLimited,            // highest claimed + open on the limited SKU (must be <= limit)
         ];
     }
 

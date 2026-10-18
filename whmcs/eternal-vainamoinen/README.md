@@ -14,54 +14,99 @@ customers and AI agents can read it and check the published odds against the dro
 
 | File | What it is |
 |------|------------|
-| `EternalVainamoinenRelease.php` | The pure decision engine — inputs in, decision out. No database, no clock, no I/O. **This is the whole algorithm.** |
+| `EternalVainamoinenRelease.php` | The pure decision engine — inputs in, decision out. No database, no clock, no I/O. |
 | `EternalVainamoinenReleaseTest.php` | Plain-PHP regression tests that lock the reviewed behaviour. The cheapest way to verify. |
-| `EternalVainamoinenSimulator.php` | A synthetic-data simulator that runs the engine over a full campaign and asserts the invariants every tick. |
+| `EternalVainamoinenSimulator.php` | A synthetic-data simulator that drives the engine the way the production cron does, over a full campaign, and asserts the invariants every tick. |
 | `sim-scenarios.php` | An example driver — 4 scenarios × 6 seeds, with a readable report. **Run this** to watch a full campaign. |
 
 ## Run it (= verify it)
 
 ```bash
-php EternalVainamoinenReleaseTest.php     # → ALL 16 TESTS PASSED
+php EternalVainamoinenReleaseTest.php     # → ALL 49 TESTS PASSED
 php sim-scenarios.php                      # → full multi-scenario simulation report
 ```
 
-The simulator demonstrates the three things that matter:
+The tests and the simulator show the things that matter:
 
-- **Convergence** — the drip paces toward the target and stops there, tightly bounded: a long pause followed
-  by catch-up can tip the realized total ~1 over, but it never runs away past the target.
+- **Convergence** — the drip paces toward the target and stops there; it can undershoot when capacity or demand
+  lags, it does not run away past the target.
 - **Reserve safety** — a held-back reserve is never breached, even under capacity pressure (the campaign
   *undershoots* rather than eat the reserve).
+- **Limits hold** — a product sold as "Claimed: N of LIMIT" never passes its limit, and its releases are spread to
+  its due date instead of selling out months early.
 - **Published == enforced** — the realized drop-share per type matches the odds the engine published, within
-  sampling noise. That equality is the fairness guarantee, shown empirically.
+  sampling noise.
 
-## How it works (two stages per tick)
+## How it works
 
-Call `evaluate()` once per "stream" per tick. It runs, in order:
+Each 5-minute tick the cron asks the engine, stream by stream: *does* a drop fire, and if so, *which* product?
+At most **one release per tick** across the whole campaign.
 
-1. **Rate** (`dropProbability`) — *does* a drop fire this tick? Pace **N = already-released (Active sold + Free open)**
-   toward the schedule, checked at **four horizons** (day / 7-day / month / full campaign): each horizon's needed rate is
-   `max(0, scheduled-by-then − N) / horizon`, and the engine takes the **min** — so the rate falls to **0 (brake)** the
-   moment N is at/ahead of schedule on *any* horizon, and otherwise paces toward the target. **No floor** — being ahead
-   stops the drip, it does not idle at a minimum. Counting Free (open, unsold) inside N is what makes standing inventory
-   self-limit: as open piles up, N moves ahead of schedule and the rate brakes — so **over-supply needs no separate term
-   in the rate**; it falls out of the N-vs-schedule pacing. Bounded by an account cap and a live operator knob (`0` =
-   pause, `<1` throttle, `>1` boost), part of the published config so live tuning stays verifiable.
-2. **Selection** (`weights` → `pickByWeight`) — *which* type, only if a drop fired? Weighted by available
-   capacity (`free − reserve`, the classic protection level), then an **over-supply divider on each type's open
-   stock** — a smooth curve that damps a type as its unsold inventory grows and hard-zeros at `min(cap, free)`, so
-   released-but-unsold can never exceed true capacity — then scaled by per-tier and per-SKU biases. `publishedOdds()`
-   returns exactly these normalized weights — what a page displays *is* what the code uses.
+### 1. Rate — does a drop fire this tick?
+
+For a stream (a group of products sharing one target), the needed rate is the mean pace that lands what is still
+to release at the campaign end:
+
+```
+rate = rate(target − (Active + Free), seconds left in the campaign, tick interval)     // = remaining / ticks left
+```
+
+*Active* is sold accounts, *Free* is released-but-unsold stock. Counting Free means standing stock slows the drip
+by itself. Once Active + Free reaches the target the stream stops. Then:
+
+- **Global open buffer** (`factorGlobalOpen`): the rate tapers linearly to 0 as the TOTAL unsold stock across every
+  product goes from 40 to 50 (`TARGET_OPEN` 50, band 10), so open stock holds near 50; as people buy, it refills.
+- **Operator knob** (`factorOperatorControl`): `0` pauses, `<1` throttles, `>1` boosts. Its live value is published
+  in the feed as `operator_control`.
+
+### 1b. Limited releases — "Claimed: N of LIMIT"
+
+Some products are sold with a published limit. Each one is its own stream with a **due date**: its own date if it
+has one, otherwise the campaign end (2026-12-31). Its **maximum** rate is:
+
+```
+limitedRate = rate(limit − claimed − open, seconds to the due date, tick interval)
+```
+
+that is, everything that may still be released, spread evenly over the time left to the due date. *Claimed* counts
+every slot ever taken, including ones later cancelled — the same number the page shows. This maximum is also the
+ceiling (`Pacing::maxRate`): the buffer and the knob can slow a limited product, nothing can make it faster. At the
+limit the rate is 0, and `withinLimit()` (claimed + open < limit) is re-checked at the moment of release, so a sale
+that lands between the check and the release cannot push it over. If the published limits cannot be read, nothing
+is released.
+
+### 2. Selection — which product, if a drop fired?
+
+`weights()` → `pickByWeight()`. Weighted by available capacity (`free − reserve`, the classic protection level),
+then an **over-supply divider on each product's open stock** — weight ÷ (1 + (open − 3)/10) above 3 open, hard 0 at
+`min(10, free)`, so released-but-unsold can never exceed true capacity — then per-tier and per-product biases.
+`publishedOdds()` returns exactly these normalized weights — what the feed shows *is* what the code uses.
 
 For provably-fair draws, inject a seeded / commit-reveal RNG via the constructor (the default `mt_rand` is
 convenient, not auditable).
 
+## Check the live campaign
+
+The live feed is `https://pulsedmedia.com/data/v1/eternal-drops.json`, rewritten every tick; every release is
+appended to `https://pulsedmedia.com/data/v1/eternal-drops-audit.jsonl`. In the feed, each limited product carries
+`limit`, `claimed`, `due` and `max_drop_chance_per_tick` next to `open_now` and `drop_chance_per_tick`. For each
+one you can check:
+
+- `claimed + open_now <= limit`;
+- `max_drop_chance_per_tick == limitedRate(limit, claimed, open_now, due − generated_at, tick_interval_seconds)`
+  (to rounding);
+- `drop_chance_per_tick <= max_drop_chance_per_tick`.
+
+The maximum is computed at the start of the tick; on a tick where that product was released, `open_now` already
+counts the new slot, so recompute with `open_now − 1` for that tick (the audit log shows which tick released it).
+
 ## What's NOT here (and why that's fine)
 
-Only the **decision logic** is open. The production cron that wires this to live billing — reading capacity,
-applying the release, writing the public feed — is deployment-specific plumbing and stays private. It carries
-**no** decision logic; everything that determines *fairness* lives in this directory. You can verify the
-fairness without seeing the plumbing, which is the whole idea.
+The production cron that wires this to live billing stays private: it reads live capacity, holds back the reserve
+that keeps normal full-price stock for regular orders (a product with no room for that has `free = 0`), reads the
+published limits, applies the release, and writes the feed. Apart from those capacity inputs, the rules it applies
+are the engine functions above (`rate`, `limitedRate`, `withinLimit`, `evaluate`), so the logic that decides the
+pace and the odds is all in this directory.
 
 ## License
 

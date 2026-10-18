@@ -30,13 +30,19 @@ declare(strict_types=1);
  * one qty++, and publishes the returned odds. Each FACTOR is a method, composed incrementally, in a fixed
  * order: decide IF a drop happens first, then WHICH slot type last.
  *
- * 1. Rate (whether a drop fires this tick). dropProbability() takes the MIN over FOUR real-time windows (a
- *    Pacing: day, week, month, campaign): each window's rate clears that window's schedule deficit of
- *    (Active+Free) vs target, so the rate falls to 0 on ANY window already at/ahead of pace — the tightest
- *    window brakes the drip. The TOTAL is the hard end — totalRemaining <= 0 stops the campaign. Real-time
- *    (remaining/seconds_left × interval) so the cron cadence (30s, 5min) does not change the realized rate.
- *    factorAccountCap() bounds it; factorOperatorControl() applies the operator's live knob (0 = pause,
- *    <1 throttle, >1 boost), part of the PUBLISHED config so live tuning stays verifiable.
+ * 1. Rate (whether a drop fires this tick). dropProbability() takes the MIN of the Pacing rates. The live cron
+ *    passes ONE rate per stream: rate(target − (Active+Free), seconds left in the campaign, interval) — the mean
+ *    pace that lands the target at the campaign end, falling as (Active+Free) catches up. The TOTAL is the hard
+ *    end — totalRemaining <= 0 stops the stream. Real-time (remaining/seconds_left × interval) so the cron cadence
+ *    (30s, 5min) does not change the realized rate. factorAccountCap() bounds it; factorGlobalOpen() tapers it
+ *    as the TOTAL open (unsold) stock across every SKU nears TARGET_OPEN; factorOperatorControl() applies the
+ *    operator's live knob (0 = pause, <1 throttle, >1 boost), part of the PUBLISHED config.
+ *
+ * 1b. Limited releases ("Claimed: N of LIMIT"). A SKU with a published limit is its own stream with a due date.
+ *    limitedRate() is its MAXIMUM rate: what may still be released (limit − claimed − open) spread evenly over the
+ *    time left to the due date. It is passed as the Pacing rate AND its ceiling (Pacing::maxRate), so no knob can
+ *    push the SKU faster than "the whole limit by the due date". withinLimit() is the hard stop the caller
+ *    re-checks at the release itself: claimed + open may never reach past the limit.
  *
  * 2. Selection (which slot type, only if a drop fired). weights() chains the weight factors:
  *    factorCapacity (max(0, free − N), the protection level), factorOverSupply (a smooth one-sided divider
@@ -60,10 +66,9 @@ declare(strict_types=1);
  *   - One drop per tick across streams: when the workhorse and rare streams both run, a thin coordinator
  *     must ensure at most one release per tick.
  *   - Tightly bounded, can undershoot: the rate is capped at 1.0/tick and dropProbability returns 0 once
- *     net-active reaches the target (totalRemaining ≤ 0), so the drip stops there rather than running away.
- *     When behind, the monthly/total needs pull the rate UP (the max) to catch up within the cap; it can
- *     undershoot if demand or capacity lags, and a hard catch-up (e.g. after a long pause) can tip the
- *     realized total ~1 past target via in-flight demand on already-released stock. Bounded, not exact.
+ *     (Active+Free) reaches the target (totalRemaining ≤ 0), so the drip stops there rather than running away.
+ *     When behind, the remaining/time-left rate rises to catch up within the cap; it can undershoot if demand
+ *     or capacity lags. A limited SKU never passes its limit: the caller re-checks withinLimit() at the release.
  *   - RNG: the default mt_rand is not reproducible. For publicly-auditable fairness, inject a seeded /
  *     commit-reveal RNG via the constructor.
  *
@@ -96,15 +101,16 @@ final class EternalVainamoinenRelease
     // ────────────────────────────────────────────────────────────────────────────────────────────
     // Over-supply curb tunables (factorOverSupply) — a single static curve on OPEN unsold slots; the sales
     // feedback loop (open accumulates only when not selling) makes one curve adapt per-SKU with no per-plan
-    // figures. Operator calibration 2026-06-08 ("open=5 → ÷1.2, absolutely zero at 15"):
+    // figures. Calibrated 2026-06-08 (open=5 → ÷1.2); MAX lowered 15→10 on 2026-07-02, which halves the
+    // worst-case simultaneous-claim commitment while capacity is tight; K/D curve unchanged:
     private const OVERSUPPLY_K   = 3.0;    // no curb at/below this many open slots (shopfront buffer)
     private const OVERSUPPLY_D   = 10.0;   // divider slope: weight ÷ (1 + (open − K)/D) above K
-    private const OVERSUPPLY_MAX = 15.0;   // marketing upper bound; the LIVE hard 0 is min(this, free) — see factorOverSupply
+    private const OVERSUPPLY_MAX = 10.0;   // marketing upper bound; the LIVE hard 0 is min(this, free) — see factorOverSupply
 
     // (Removed 2026-06-14) The Stage-1 over-supply-on-the-CHANCE divider/hard-stop was deleted: over-supply is a
     // STAGE-2 (which-SKU) concern only (factorOverSupply). The RATE just paces to the mean; jamming over-supply into
-    // the rate strangled the drip (~5/day vs the ~23/day mean) for a handful of unsold slots. Pacing->totalOpen is
-    // retained as an accepted-but-unused field so the caller's Pacing construction stays source-compatible.
+    // the rate strangled the drip (~5/day vs the ~23/day mean) for a handful of unsold slots. Pacing->totalOpen now
+    // carries the GLOBAL open count for the buffer governor (factorGlobalOpen, below), not a per-stream curb.
 
     /** @var callable():float Inject a seeded RNG for reproducible / publicly-auditable draws. */
     private $rng;
@@ -114,11 +120,11 @@ final class EternalVainamoinenRelease
         $this->rng = $rng ?? static fn (): float => mt_rand() / (mt_getrandmax() + 1.0);
     }
 
-    // ───────── RATE factor methods: each returns a per-tick drop probability; combined by MAX (need pulls up, floor holds) ─────────
+    // ───────── RATE methods: each returns a per-tick drop probability ─────────
 
     /**
-     * Per-tick rate needed to clear `remaining` (net-active) over `secondsLeft` at this interval. The caller
-     * uses this to build a Pacing (daily floor + monthly + total needs). Real-time, so the cron cadence is free.
+     * Per-tick rate needed to clear `remaining` (still to release) over `secondsLeft` at this interval: the mean
+     * pace that lands `remaining` exactly at the end of `secondsLeft`. Real-time, so the cron cadence is free.
      */
     public static function rate(float $remaining, float $secondsLeft, float $intervalSeconds): float
     {
@@ -129,20 +135,41 @@ final class EternalVainamoinenRelease
     }
 
     /**
-     * Default daily floor rate: the steady minimum (monthlyTarget / 30.44 days) per tick, so the chance never
-     * quite reaches zero while the campaign runs. 30.44 = the average Gregorian month (365.25 / 12). This is the
-     * sensible default (it equals the nominal pace); pass a smaller dailyFloor to Pacing if you want more
-     * slow-down when ahead. Not an operator decision — a derived default.
+     * MAXIMUM per-tick rate of a limited SKU ("Claimed: N of LIMIT", sold by a due date): what may still be
+     * released, limit − claimed − open, spread evenly over the time left to the due date. 0 at the limit. At or past
+     * the due date with stock still allowed, one interval is the horizon (rate = min(1, remaining)), so a SKU the
+     * gates held back still finishes, at most one release per tick. `claimed` counts every slot ever taken (sold,
+     * including ones later cancelled), the same count the page shows as "Claimed".
      */
-    public static function dailyFloorRate(float $monthlyTarget, float $intervalSeconds): float
+    public static function limitedRate(int $limit, int $claimed, int $open, float $secondsToDue, float $intervalSeconds): float
     {
-        return self::rate($monthlyTarget, 30.44 * 86400.0, $intervalSeconds);
+        return self::rate((float) max(0, $limit - $claimed - $open), max($intervalSeconds, $secondsToDue), $intervalSeconds);
+    }
+
+    /** Hard stop for a limited SKU: one more release is allowed only while claimed + open stays below the limit. */
+    public static function withinLimit(int $limit, int $claimed, int $open): bool
+    {
+        return $claimed + $open < $limit;
     }
 
     /** Total-account cap expressed as a per-tick rate ceiling. */
     private function factorAccountCap(float $headroomRate): float
     {
         return min(1.0, max(0.0, $headroomRate));
+    }
+
+    // ── Global open-buffer governor (added 2026-08-22, target raised 30 -> 50 on 2026-10-05) ──
+    // Scales the total drip RATE down as GLOBAL total open (sum across ALL campaign SKUs) approaches TARGET_OPEN.
+    // Full rate while open <= TARGET_OPEN - TAPER_BAND; linear taper to 0 at TARGET_OPEN. Holds total open ~TARGET_OPEN:
+    // when slots sell (open falls), the factor rises and the drip refills toward the target. This governs the BUFFER,
+    // NOT throughput — as customers claim, open drops and the drip resumes, so the 4900 total is unaffected.
+    private const TARGET_OPEN = 50.0;   // operator knob: desired steady-state TOTAL open across all campaign SKUs (30 -> 50 on 2026-10-05)
+    private const TAPER_BAND  = 10.0;   // operator knob: width of the ramp below TARGET_OPEN (full->0 over this span)
+
+    /** Governor factor in [0,1]: 1 when total open is low, 0 at/above TARGET_OPEN. Applied to the drip rate. */
+    private function factorGlobalOpen(float $globalOpen): float
+    {
+        return min(1.0, max(0.0, (self::TARGET_OPEN - $globalOpen) / self::TAPER_BAND));
     }
 
     /**
@@ -173,7 +200,8 @@ final class EternalVainamoinenRelease
      * this self-curbs a SKU that is not selling (open piles up → weight falls) while a strong seller never
      * accumulates open (no curb) — a single static curve yields per-SKU-adaptive behaviour with NO per-SKU
      * tuning. One-sided by design: below K there is NO ramp, so it only ever curbs over-supply, never boosts
-     * scarcity (that would dilute "emphasize strong selling"). K=3/D=10/MAX=15: open=5 → ÷1.2 (operator calibration).
+     * scarcity (that would dilute "emphasize strong selling"). K=3/D=10/MAX=10: open=5 → ÷1.2
+     * (calibrated 2026-06-08; MAX 15→10 on 2026-07-02).
      *
      * LOAD-BEARING SAFETY — DO NOT REMOVE THE min(.., free): the hard ceiling is the SKU's LIVE true free
      * capacity, not a static number. `free` is recomputed from the shared pool every tick and EXCLUDES
@@ -224,9 +252,9 @@ final class EternalVainamoinenRelease
     // ───────── composition: rate first (whether), weights last (which) ─────────
 
     /**
-     * Stage 1 — does a drop fire this tick? Purely a RATE question: pace toward the mean (target/campaign), checked
-     * at four windows (day / 7-day / month / campaign); the MIN governs, so the drip brakes (rate 0) once
-     * (Active+Free) is at/ahead of ANY window's schedule, and otherwise paces to the mean. NOTHING about over-supply
+     * Stage 1 — does a drop fire this tick? Purely a RATE question: the MIN of the Pacing rates (the live cron passes
+     * one: remaining / time left), so the rate falls as (Active+Free) catches up and is 0 once the target is
+     * released. Then the account cap, the global open buffer, the operator knob and the maxRate ceiling. NOTHING about over-supply
      * lives here — over-supply is a STAGE-2 (which-SKU) concern (factorOverSupply), not a rate concern. Keeping the
      * rate clean is the point: it just draws the campaign toward the mean (e.g. 700/month) and catches up when behind.
      */
@@ -235,12 +263,13 @@ final class EternalVainamoinenRelease
         if ($pace->totalRemaining <= 0.0) {
             return 0.0;                                                       // already released the whole target — stop
         }
-        // Tightest temporal window governs: the per-tick release chance is the MIN over the four windows' needed
-        // rates. Each window's rate is 0 once (Active+Free) is at/ahead of that window's schedule, so a glut on ANY
-        // window brakes the drip. No floor — the chance can and should fall to 0 when already-released is ahead of pace.
+        // The tightest needed rate governs (min). No floor — the chance can and should fall to 0 when already-released
+        // is ahead of pace.
         $paced = $pace->rates ? min($pace->rates) : 0.0;
         $paced = min($paced, $this->factorAccountCap($capHeadroomRate));
-        return $this->factorOperatorControl(min(1.0, max(0.0, $paced)), $operatorControl);
+        $paced *= $this->factorGlobalOpen($pace->totalOpen);                  // hold GLOBAL total open ~ TARGET_OPEN
+        // maxRate: the ceiling no knob may exceed (a limited SKU's limitedRate(); 1.0 for the streams)
+        return min($pace->maxRate, $this->factorOperatorControl(min(1.0, max(0.0, $paced)), $operatorControl));
     }
 
     /** Stage 2 — per-type selection weights; factor methods chained incrementally. @param SlotType[] $types keyed by id */
@@ -309,18 +338,18 @@ final class EternalVainamoinenRelease
 }
 
 /**
- * The pacing input for one stream/tick. `nominal` is the plan's own average per-tick pace (target × interval /
- * campaign_seconds), so pacing is plan-relative — NOT a static rate shared across plans. `fills` are the four
- * time-scale fill ratios [day, week, month, total], each released_in_window / window_target (clamp 0..1): they drive
- * the S-curve down when a scale is full and up when empty. totalRemaining <= 0 ends the campaign (the hard stop).
+ * The pacing input for one stream/tick. `rates` are needed per-tick rates; min() governs (the live cron passes one:
+ * remaining / time left). totalRemaining <= 0 ends the stream (the hard stop). `maxRate` is a ceiling applied after
+ * every factor and knob — a limited SKU passes its limitedRate() here so nothing can drip it faster.
  */
 final class Pacing
 {
-    /** @param float[] $rates per-window release rates [day, week, month, campaign] to clear the (Active+Free) deficit */
+    /** @param float[] $rates needed per-tick release rates; min() governs */
     public function __construct(
-        public array $rates,           // per-window needed rate; min() governs (the tightest window brakes the drip)
-        public float $totalRemaining,  // target − (Active+Free); <= 0 => already released the whole target => stop
-        public float $totalOpen = 0.0, // stream's total available (open, unsold) — damps the CHANCE (see dropProbability)
+        public array $rates,           // needed rate(s); min() governs
+        public float $totalRemaining,  // still to release (target − (Active+Free), or limit − claimed − open); <= 0 => stop
+        public float $totalOpen = 0.0, // GLOBAL total open (unsold) across ALL SKUs — governs the drip rate toward TARGET_OPEN (factorGlobalOpen)
+        public float $maxRate = 1.0,   // ceiling after all factors and the operator knob (limited SKUs: limitedRate())
     ) {}
 }
 
