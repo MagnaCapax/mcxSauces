@@ -46,6 +46,11 @@ No WHMCS hook can refuse a payment: the invoice is marked paid before any hook r
   Unsuspending a suspended service is not checked, because the hook watches creates only.
 - A failed create is retried by WHMCS. The note is written once per service; the Activity Log line repeats.
 - Tests: `php whmcs/hooks/tests/blacklist-and-cap-test.php`.
+- Update 2026-10-23: the cancel left to staff is now done by a daily job outside WHMCS, so the hook still changes
+  no order state. The job cancels the order with no refund through the order-cancel API, then closes the client
+  once nothing is left on it. It acts only when every service on the order is Pending, the invoice is Paid and the
+  block note is dated no later than one day after the payment. A later note means a create was retried after a
+  later ban, so the payment may predate the ban; that order is left alone.
 
 ## References
 - ADR-0003 (checkout refusal; its provisioning part is superseded here).
