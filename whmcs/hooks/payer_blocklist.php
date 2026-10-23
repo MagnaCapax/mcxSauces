@@ -24,6 +24,10 @@
  * WHAT THIS HOOK DOES
  * -------------------
  *   ShoppingCartValidateCheckout (before the order exists):
+ *     client in the blacklist group (staff-set, PM_BLACKLIST_GROUP_ID) and the cart
+ *     holds a new product or addon -> order refused with the same generic message,
+ *     whatever the list says and even when the list file is missing; a cart that
+ *     only renews or pays for what the client already has is never refused
  *     name + email match an entry -> order refused with a generic message
  *     name only                   -> flag (logged), order proceeds
  *   PreModuleCreate (after payment, before provisioning):
@@ -75,6 +79,10 @@ unset($pmPblPrivate);
 if (!defined('PM_PAYER_BLOCKLIST_BLOCK_MESSAGE')) {
     define('PM_PAYER_BLOCKLIST_BLOCK_MESSAGE',
         'We are unable to process this order. Please contact support if you believe this is an error.');
+}
+// Same id and guard as autoclose_blacklisted_tickets.php; each hook file is deployed on its own.
+if (!defined('PM_BLACKLIST_GROUP_ID')) {
+    define('PM_BLACKLIST_GROUP_ID', 9);
 }
 
 // ---------------------------------------------------------------------------
@@ -277,7 +285,7 @@ function pm_pbl_payer_for_service(int $serviceId): ?array
         ->where('tblinvoiceitems.type', 'Hosting')->where('tblinvoiceitems.relid', $serviceId)
         ->where('tblinvoices.status', 'Paid')->orderBy('tblinvoices.datepaid', 'desc')
         ->first(['tblinvoices.id', 'tblinvoices.paymentmethod']);
-    $transid = $inv ? (string) $db::table('tblaccounts')->where('invoiceid', $inv->id)->orderBy('id', 'desc')->value('transid') : '';
+    $transid = $inv ? (string) $db::table('tblaccounts')->where('invoiceid', $inv->id)->where('billingnoteid', 0)->orderBy('id', 'desc')->value('transid') : '';
     $method = $inv ? (string) $inv->paymentmethod : '';
     $sub = $svc ? (string) $svc->subscriptionid : '';
 
@@ -327,6 +335,18 @@ function pm_pbl_match_any(array $list, array $names, string $email, string $paye
     return $best;
 }
 
+/**
+ * True when a client in the blacklist group is buying something new: the cart has a product or an addon line.
+ * Renewals, upgrades and invoice payments carry no such line, so a blacklisted client can still pay.
+ */
+function pm_pbl_group_blocks(int $groupId, array $cart): bool
+{
+    if ($groupId !== PM_BLACKLIST_GROUP_ID) {
+        return false;
+    }
+    return !empty($cart['products']) || !empty($cart['addons']);
+}
+
 // ---------------------------------------------------------------------------
 // Hooks (not registered when this file is loaded outside WHMCS, e.g. by the list tooling)
 // ---------------------------------------------------------------------------
@@ -335,19 +355,28 @@ if (function_exists('add_hook') && defined('ROOTDIR')) {
 
     add_hook('ShoppingCartValidateCheckout', 1, function ($vars) {
         try {
-            $list = pm_pbl_load();
-            if ($list === null) {
-                return '';
-            }
             $clientId = (int) ($vars['clientId'] ?? $vars['userid'] ?? 0);
             $name = trim(($vars['firstname'] ?? '') . ' ' . ($vars['lastname'] ?? ''));
             $email = (string) ($vars['email'] ?? '');
             if ($clientId > 0) {
-                $c = \WHMCS\Database\Capsule::table('tblclients')->where('id', $clientId)->first(['firstname', 'lastname', 'email']);
+                $c = \WHMCS\Database\Capsule::table('tblclients')->where('id', $clientId)->first(['firstname', 'lastname', 'email', 'groupid']);
                 if ($c) {
                     $name = trim($c->firstname . ' ' . $c->lastname);
                     $email = (string) $c->email;
+                    $cart = class_exists('\WHMCS\Session') ? \WHMCS\Session::get('cart') : null;
+                    if (!is_array($cart)) {
+                        $cart = $_SESSION['cart'] ?? [];
+                    }
+                    if (pm_pbl_group_blocks((int) $c->groupid, is_array($cart) ? $cart : [])) {
+                        pm_pbl_log('match', ['stage' => 'checkout', 'decision' => 'block', 'entry' => 'group', 'client_id' => $clientId]);
+                        logActivity(sprintf('PAYER-BLOCKLIST BLOCK at checkout: blacklist group %d, client_id=%d', PM_BLACKLIST_GROUP_ID, $clientId));
+                        return PM_PAYER_BLOCKLIST_BLOCK_MESSAGE;
+                    }
                 }
+            }
+            $list = pm_pbl_load();
+            if ($list === null) {
+                return '';
             }
             $r = pm_pbl_match_any($list, [$name], $email, '');
             if ($r['decision'] === 'none') {
@@ -359,6 +388,7 @@ if (function_exists('add_hook') && defined('ROOTDIR')) {
                 strtoupper($r['decision']), $r['entry'], $clientId, $r['name'] ? 'yes' : 'no', $r['email'] ? 'yes' : 'no'));
             return $r['decision'] === 'block' ? PM_PAYER_BLOCKLIST_BLOCK_MESSAGE : '';
         } catch (\Throwable $e) {
+            error_log('payer_blocklist: checkout check failed, order allowed: ' . $e->getMessage());
             return '';
         }
     });

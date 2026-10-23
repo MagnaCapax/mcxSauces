@@ -16,7 +16,8 @@ There is no CI and no repository-wide test suite. Run what exists:
 
 - `php whmcs/eternal-vainamoinen/EternalVainamoinenReleaseTest.php` passes when you touch that directory (it prints `ALL 16 TESTS PASSED` and exits 0; a failure exits non-zero). Read the summary and the exit code; do not pipe it through anything that hides them.
 - `php -l <file>` on every PHP file you changed, and `bash -n <file>` on every shell script you changed.
-- The WHMCS hooks have no automated tests. A hook change is checked in a WHMCS installation after deploy; say in the commit what you checked.
+- `php whmcs/hooks/tests/blacklist-and-cap-test.php` passes when you touch `payer_blocklist.php` or `product_per_client_cap.php` (pure decisions only, no database; exit 0 when all pass).
+- The other WHMCS hooks have no automated tests. A hook change is checked in a WHMCS installation after deploy; say in the commit what you checked.
 - New behaviour has a test that fails when the behaviour is broken (break it once and see).
 - Review the change with the [review unit](https://github.com/MagnaCapax/mcxPikkumies/tree/main/pikkumies/tools/development/code-review): correctness, an adversarial pass, weakness classes, and conformance to `AGENTS.md`, the ADRs and the principles. Any agent can follow its `skill.md`.
 - No model provider or model name, no internal hostname or address, no credential, no customer data and nothing else that is not meant for the public: this repository is public.

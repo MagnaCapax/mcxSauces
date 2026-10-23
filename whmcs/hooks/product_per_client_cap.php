@@ -11,6 +11,9 @@
  *     the cart must not exceed the cap. Otherwise checkout is refused with a message
  *     naming the product and the limit, and an Activity Log line is written.
  *   Guests (no account yet) hold nothing, so only the cart quantity counts.
+ *   pm_ppc_at_cap() gives the same answer to other callers: the customer-to-customer
+ *   transfer paths ask it before moving a capped service to a recipient, so a transfer
+ *   cannot do what checkout refuses.
  *
  * THE CONFIG FILE
  * ---------------
@@ -105,6 +108,30 @@ if (!function_exists('pm_ppc_caps')) {
         return $over;
     }
 
+    /** Services of $pid the client holds that count toward the cap (an unpaid order counts). Needs WHMCS. */
+    function pm_ppc_held(int $clientId, int $pid): int
+    {
+        if ($clientId <= 0) {
+            return 0;
+        }
+        return (int) \WHMCS\Database\Capsule::table('tblhosting')->where('userid', $clientId)
+            ->where('packageid', $pid)->whereIn('domainstatus', ['Pending', 'Active', 'Suspended'])->count();
+    }
+
+    /**
+     * One more service of $pid would take the client over its cap: returns ['pid', 'cap', 'held'], else null.
+     * Uncapped products, a missing config and guests return null, like checkout.
+     */
+    function pm_ppc_at_cap(int $clientId, int $pid, ?array $caps = null, ?callable $held = null): ?array
+    {
+        $caps = $caps ?? pm_ppc_caps();
+        if (!isset($caps[$pid])) {
+            return null;
+        }
+        $h = $held ? (int) $held($clientId, $pid) : pm_ppc_held($clientId, $pid);
+        return $h + 1 > $caps[$pid] ? ['pid' => $pid, 'cap' => $caps[$pid], 'held' => $h] : null;
+    }
+
     /** Customer-facing message for one over-cap row; the product name is HTML-escaped. */
     function pm_ppc_message(array $row): string
     {
@@ -132,11 +159,7 @@ if (!function_exists('pm_ppc_caps')) {
                 $cartQty = pm_ppc_cart_quantities(is_array($cart['products'] ?? null) ? $cart['products'] : []);
                 $clientId = (int) ($vars['clientId'] ?? $vars['userid'] ?? 0);
                 $held = function (int $pid) use ($clientId): int {
-                    if ($clientId <= 0) {
-                        return 0;
-                    }
-                    return (int) \WHMCS\Database\Capsule::table('tblhosting')->where('userid', $clientId)
-                        ->where('packageid', $pid)->whereIn('domainstatus', ['Pending', 'Active', 'Suspended'])->count();
+                    return pm_ppc_held($clientId, $pid);
                 };
                 $name = function (int $pid): string {
                     return (string) \WHMCS\Database\Capsule::table('tblproducts')->where('id', $pid)->value('name');
