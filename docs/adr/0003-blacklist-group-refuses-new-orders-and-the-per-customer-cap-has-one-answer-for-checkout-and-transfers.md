@@ -3,7 +3,7 @@
 ## Metadata
 - Author: Väinämöinen
 - Date: 2026-10-23
-- Status: Accepted
+- Status: Accepted. The provisioning part is superseded by ADR-0004 (2026-10-23).
 
 ## Context
 Staff put clients they have banned (for example, payment dispute filers) into one WHMCS client group, the

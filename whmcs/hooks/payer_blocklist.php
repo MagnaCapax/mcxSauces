@@ -31,6 +31,11 @@
  *     name + email match an entry -> order refused with a generic message
  *     name only                   -> flag (logged), order proceeds
  *   PreModuleCreate (after payment, before provisioning):
+ *     client in the blacklist group -> provisioning aborted, whatever the list says
+ *       and even when the list file is missing; an internal client note (once per
+ *       service) and an Activity Log line are written; no refund (operator ruling
+ *       23/10/2026). Renewals and invoice payments never reach this hook, so a
+ *       blacklisted client can still pay for what it holds
  *     the paying PayPal account's name + payer ID (or payer email) match an entry
  *       -> provisioning aborted (abortcmd), an internal client note and an
  *          Activity Log line are written so staff can return the payment and
@@ -347,6 +352,40 @@ function pm_pbl_group_blocks(int $groupId, array $cart): bool
     return !empty($cart['products']) || !empty($cart['addons']);
 }
 
+/**
+ * True when a new service of a client in the blacklist group is about to be provisioned (PreModuleCreate, ADR-0004).
+ * The handler leaves addon creates alone before asking: they hang off a parent service that was already refused.
+ */
+function pm_pbl_provision_group_blocks(int $groupId): bool
+{
+    return $groupId === PM_BLACKLIST_GROUP_ID;
+}
+
+/** Internal note for a provisioning refused because the client is in the blacklist group. */
+function pm_pbl_group_provision_note(int $serviceId, string $date): string
+{
+    return sprintf('PAYER-BLOCKLIST BLOCK at provisioning: service %d, blacklist group %d. Provisioning aborted;'
+        . ' operator ruling 23/10/2026 for banned clients who pay again: block them, "maybe not even refund, just cancel that account".'
+        . ' To allow it, move the client out of the group first.  -payer_blocklist %s', $serviceId, PM_BLACKLIST_GROUP_ID, $date);
+}
+
+/**
+ * Internal client note (never shown to the client) so staff see why a service is not provisioned.
+ * Appended in one statement so a note written concurrently by staff is never lost, and only once per
+ * service: WHMCS re-queues the failed create and retries it every day. WHMCS only.
+ */
+function pm_pbl_note_once(int $clientId, int $serviceId, string $text): void
+{
+    $db = \WHMCS\Database\Capsule::connection();
+    $add = $db->getPdo()->quote("\n" . $text);
+    $marker = sprintf('PAYER-BLOCKLIST BLOCK at provisioning: service %d,', $serviceId);
+    \WHMCS\Database\Capsule::table('tblclients')->where('id', $clientId)
+        ->where(function ($q) use ($marker) {
+            $q->whereNull('notes')->orWhere('notes', 'not like', '%' . $marker . '%');
+        })
+        ->update(['notes' => $db->raw("CONCAT(COALESCE(notes, ''), $add)")]);
+}
+
 // ---------------------------------------------------------------------------
 // Hooks (not registered when this file is loaded outside WHMCS, e.g. by the list tooling)
 // ---------------------------------------------------------------------------
@@ -400,6 +439,18 @@ if (function_exists('add_hook') && defined('ROOTDIR')) {
             if ($serviceId <= 0 || !empty($p['addonId'])) {
                 return [];
             }
+            $clientId = (int) ($p['userid'] ?? 0);
+            if ($clientId > 0) {
+                $c = \WHMCS\Database\Capsule::table('tblclients')->where('id', $clientId)->first(['groupid']);
+                if ($c && pm_pbl_provision_group_blocks((int) $c->groupid)) {
+                    pm_pbl_log('match', ['stage' => 'provision', 'decision' => 'block', 'entry' => 'group',
+                        'client_id' => $clientId, 'service_id' => $serviceId]);
+                    logActivity(sprintf('PAYER-BLOCKLIST BLOCK at provisioning: service %d, blacklist group %d',
+                        $serviceId, PM_BLACKLIST_GROUP_ID), $clientId);
+                    pm_pbl_note_once($clientId, $serviceId, pm_pbl_group_provision_note($serviceId, gmdate('d/m/Y')));
+                    return ['abortcmd' => true];
+                }
+            }
             $list = pm_pbl_load();
             if ($list === null) {
                 return [];
@@ -413,7 +464,6 @@ if (function_exists('add_hook') && defined('ROOTDIR')) {
             if ($r['decision'] === 'none') {
                 return [];
             }
-            $clientId = (int) ($p['userid'] ?? 0);
             pm_pbl_log('match', ['stage' => 'provision', 'decision' => $r['decision'], 'entry' => $r['entry'],
                 'client_id' => $clientId, 'service_id' => $serviceId, 'payer_source' => $payer['source'] ?? 'none',
                 'name' => $r['name'], 'email' => $r['email'], 'payer' => $r['payer']]);
@@ -424,18 +474,8 @@ if (function_exists('add_hook') && defined('ROOTDIR')) {
             if ($r['decision'] !== 'block') {
                 return [];
             }
-            // Internal note (never shown to the client) so staff see why the service is not provisioned.
-            // Appended in one statement so a note written concurrently by staff is never lost, and only
-            // once per service: WHMCS re-queues the failed create and retries it every day.
-            $db = \WHMCS\Database\Capsule::connection();
-            $add = $db->getPdo()->quote("\n" . $line . '. Provisioning aborted; return the payment and close the account.'
+            pm_pbl_note_once($clientId, $serviceId, $line . '. Provisioning aborted; return the payment and close the account.'
                 . '  -payer_blocklist ' . gmdate('d/m/Y'));
-            $marker = sprintf('PAYER-BLOCKLIST BLOCK at provisioning: service %d,', $serviceId);
-            \WHMCS\Database\Capsule::table('tblclients')->where('id', $clientId)
-                ->where(function ($q) use ($marker) {
-                    $q->whereNull('notes')->orWhere('notes', 'not like', '%' . $marker . '%');
-                })
-                ->update(['notes' => $db->raw("CONCAT(COALESCE(notes, ''), $add)")]);
             return ['abortcmd' => true];
         } catch (\Throwable $e) {
             return [];

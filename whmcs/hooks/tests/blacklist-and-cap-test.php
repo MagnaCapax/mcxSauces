@@ -36,6 +36,16 @@ ok(!pm_pbl_group_blocks(0, $newProduct), 'client in no group: allowed');
 ok(!pm_pbl_group_blocks(3, $newProduct), 'client in another group: allowed');
 ok(!pm_pbl_group_blocks(9, ['products' => []]), 'empty product list counts as nothing new');
 
+// pm_pbl_provision_group_blocks: a new service of a blacklisted client is not provisioned (PreModuleCreate).
+ok(pm_pbl_provision_group_blocks(9), 'blacklisted client, new service: provisioning aborted');
+ok(!pm_pbl_provision_group_blocks(0), 'client in no group: provisioned');
+ok(!pm_pbl_provision_group_blocks(3), 'client in another group: provisioned');
+$note = pm_pbl_group_provision_note(40213, '23/10/2026');
+ok(strpos($note, 'PAYER-BLOCKLIST BLOCK at provisioning: service 40213,') === 0, 'note starts with the once-per-service marker');
+ok(strpos($note, 'PAYER-BLOCKLIST BLOCK at provisioning: service 4021,') === false, 'marker of another service id does not match');
+ok(strpos($note, 'return the payment') === false, 'group note gives no refund instruction');
+ok(strpos($note, '-payer_blocklist 23/10/2026') !== false, 'note carries the PM signature and date');
+
 // pm_ppc_at_cap: same arithmetic as checkout, one more service on top of what is held.
 $caps = [374 => 1, 375 => 2];
 $held = function (int $n): callable {
