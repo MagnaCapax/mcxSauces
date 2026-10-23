@@ -46,6 +46,14 @@ ok(strpos($note, 'PAYER-BLOCKLIST BLOCK at provisioning: service 4021,') === fal
 ok(strpos($note, 'return the payment') === false, 'group note gives no refund instruction');
 ok(strpos($note, '-payer_blocklist 23/10/2026') !== false, 'note carries the PM signature and date');
 
+// pm_pbl_name_tokens: a one-letter Han surname is a name part (ADR-0005); a Latin initial is not. Synthetic names.
+ok(pm_pbl_name_tokens('王 小明') === ['王', '小明'], 'Han: one-letter surname kept with the given name');
+ok(count(pm_pbl_name_keys('李 明', 'salt-for-tests-0123456789')) === 1, 'Han: one-letter surname and given name make one pair key');
+ok(pm_pbl_name_keys('王', 'salt-for-tests-0123456789') === [], 'Han: a lone surname makes no key');
+ok(count(pm_pbl_name_tokens('김 민준')) === 2, 'Hangul: one-syllable surname kept');
+ok(pm_pbl_name_tokens('J. R. Tolkien') === ['tolkien'], 'Latin initials still dropped');
+ok(pm_pbl_name_keys('小明 王', 'salt-for-tests-0123456789') === pm_pbl_name_keys('王 小明', 'salt-for-tests-0123456789'), 'Han: word order does not change keys');
+
 // pm_ppc_at_cap: same arithmetic as checkout, one more service on top of what is held.
 $caps = [374 => 1, 375 => 2];
 $held = function (int $n): callable {

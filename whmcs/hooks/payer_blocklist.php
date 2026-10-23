@@ -95,7 +95,9 @@ if (!defined('PM_BLACKLIST_GROUP_ID')) {
 // ---------------------------------------------------------------------------
 
 /**
- * Lowercase, strip accents, keep letters only; return up to 8 unique tokens of 2+ letters.
+ * Lowercase, strip accents, keep letters only; return up to 8 unique tokens of 2+ letters. A single
+ * Han or Hangul letter is kept too: it is a whole syllable, the usual length of a surname in those
+ * scripts (ADR-0005). A single Latin letter (an initial) is still dropped.
  * The name comes from the checkout form, so input and token count are capped: pair keys grow
  * with the square of the token count (an unbounded 18 KB name made 1.7M hashes).
  */
@@ -112,7 +114,7 @@ function pm_pbl_name_tokens(string $name): array
     $s = preg_replace('/[^\p{L}]+/u', ' ', $s) ?? '';
     $out = [];
     foreach (preg_split('/\s+/', trim($s)) ?: [] as $t) {
-        if (mb_strlen($t, 'UTF-8') >= 2) {
+        if (mb_strlen($t, 'UTF-8') >= 2 || preg_match('/^[\p{Han}\p{Hangul}]$/u', $t) === 1) {
             $out[$t] = true;
         }
     }
