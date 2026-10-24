@@ -103,5 +103,29 @@ foreach ($tips as $i => $subject) {
 }
 ok(likeMatches(pmOnboardingTipSubjectLikePattern($tips[6]), 'Did you know? Support looks at your actual service'), 'identical drip subject counts as the same tip');
 
+// The note written when the check is skipped (lookup error or missing template subject).
+$note = pmOnboardingTipSkippedNote($tip, "PDOException: SQLSTATE[HY000]\n  server has gone away");
+ok(strpos($note, 'onboardingTipOncePerClient: check skipped') === 0, 'skipped note starts with the hook name');
+ok(strpos($note, '"' . $tip . '"') !== false, 'skipped note names the template');
+ok(strpos($note, "\n") === false && strpos($note, 'SQLSTATE[HY000] server has gone away') !== false, 'skipped note is one line with the reason');
+$long = pmOnboardingTipSkippedNote($tip, str_repeat('x', 500));
+ok(strpos($long, str_repeat('x', 200) . '...') !== false && strpos($long, str_repeat('x', 201)) === false, 'reason is cut at 200 characters');
+ok(strpos(pmOnboardingTipSkippedNote($tip, 'template subject not found'), '(template subject not found)') !== false, 'missing subject reason is shown');
+$written = [];
+pmOnboardingTipWriteNote('n1', static function (string $n) use (&$written): void { $written[] = $n; });
+ok($written === ['n1'], 'the note goes to the given logger');
+$errorLog = tempnam(sys_get_temp_dir(), 'tipnote');
+$previous = ini_set('error_log', $errorLog);
+$threw = false;
+try {
+    pmOnboardingTipWriteNote('n2-fallback', static function (string $n): void { throw new RuntimeException('db gone'); });
+} catch (\Throwable $e) {
+    $threw = true;
+}
+ini_set('error_log', (string) $previous);
+ok(!$threw, 'a logger that throws does not escape (the email is still sent)');
+ok(strpos((string) file_get_contents($errorLog), 'n2-fallback') !== false, 'a throwing logger falls back to the PHP error log');
+unlink($errorLog);
+
 echo "$pass passed, $fail failed\n";
 exit($fail === 0 ? 0 : 1);

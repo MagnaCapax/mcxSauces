@@ -26,8 +26,10 @@
  * so a repeat inside it is always the same tip again for the same customer.
  *
  * Every other email (invoices, welcome and access emails, tickets, any template not in the list)
- * returns at the first line. Fail-open: any lookup error sends the email, as before this hook.
- * An aborted send writes no email-log row, so it never counts as received.
+ * returns at the first line. Fail-open: any lookup error sends the email, as before this hook,
+ * and writes one activity-log line per PHP process saying the check was skipped and why, so a
+ * guard that stopped guarding is visible. An aborted send writes no email-log row, so it never
+ * counts as received.
  *
  * Known effects: a tip sent by hand from the admin area to a client who got it in the last 30
  * days is aborted too (send it as a custom message instead). If the first copy of a run is
@@ -93,19 +95,52 @@ if (!function_exists('pmOnboardingTipDecision')) {
     }
 }
 
+if (!function_exists('pmOnboardingTipSkippedNote')) {
+    /** Activity-log line for a tip sent without the check: one line, at most 200 characters of reason. */
+    function pmOnboardingTipSkippedNote(string $template, string $reason): string
+    {
+        $reason = trim((string) preg_replace('/\s+/', ' ', $reason));
+        if (strlen($reason) > 200) {
+            $reason = substr($reason, 0, 200) . '...';
+        }
+        return sprintf('onboardingTipOncePerClient: check skipped, "%s" sent without the repeat check (%s);'
+            . ' logged once per run', $template, $reason);
+    }
+
+    /** Write $note with $log, falling back to error_log; never throws (the database $log uses may be the one that failed). */
+    function pmOnboardingTipWriteNote(string $note, callable $log): void
+    {
+        try {
+            $log($note);
+            return;
+        } catch (\Throwable $e) {
+        }
+        error_log($note);
+    }
+}
+
 if (function_exists('add_hook') && defined('ROOTDIR')) {
     add_hook('EmailPreSend', 1, function ($vars) {
         static $seen = [];
+        static $skipNoted = false;
         $template = (string) ($vars['messagename'] ?? '');
         if (!in_array($template, PM_ONBOARDING_TIP_TEMPLATES, true)) {
             return;
         }
+        $noteSkipped = static function (string $template, string $reason) use (&$skipNoted): void {
+            if (!$skipNoted) {
+                $skipNoted = true;
+                pmOnboardingTipWriteNote(pmOnboardingTipSkippedNote($template, $reason),
+                    function_exists('logActivity') ? 'logActivity' : 'error_log');
+            }
+        };
         $serviceId = (int) ($vars['relid'] ?? 0);
         try {
             $clientId = (int) Capsule::table('tblhosting')->where('id', $serviceId)->value('userid');
             $subject = (string) Capsule::table('tblemailtemplates')->where('name', $template)
                 ->where('language', '')->value('subject');
             if ($subject === '') {
+                $noteSkipped($template, 'template subject not found');
                 return;
             }
             $like = pmOnboardingTipSubjectLikePattern($subject);
@@ -116,6 +151,7 @@ if (function_exists('add_hook') && defined('ROOTDIR')) {
                         ->where('subject', 'like', $like)->where('date', '>=', $since)->exists();
                 });
         } catch (\Throwable $e) {
+            $noteSkipped($template, get_class($e) . ': ' . $e->getMessage());
             return; // fail-open: a lookup problem must never stop an email
         }
         if ($decision !== 'abort') {
