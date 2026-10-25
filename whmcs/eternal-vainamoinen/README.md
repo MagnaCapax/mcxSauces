@@ -58,6 +58,8 @@ by itself. Once Active + Free reaches the target the stream stops. Then:
 
 - **Global open buffer** (`factorGlobalOpen`): the rate tapers linearly to 0 as the TOTAL unsold stock across every
   product goes from 40 to 50 (`TARGET_OPEN` 50, band 10), so open stock holds near 50; as people buy, it refills.
+  A limited release (1b) applies the same buffer to its OWN open stock only, so other products' unsold stock cannot
+  stop it reaching its due date.
 - **Operator knob** (`factorOperatorControl`): `0` pauses, `<1` throttles, `>1` boosts. Its live value is published
   in the feed as `operator_control`.
 
@@ -74,7 +76,8 @@ limitedRate = rate(limit − taken − open, seconds to the due date, tick inter
 that is, everything that may still be released, spread evenly over the time left to the due date. *Claimed* counts
 every slot ever taken, including ones later cancelled — the same number the page shows. *Pending* counts unpaid
 orders, each of which holds a slot until it is paid or cancelled. This maximum is also the ceiling
-(`Pacing::maxRate`): the buffer and the knob can slow a limited product, nothing can make it faster. At the limit the
+(`Pacing::maxRate`): its own open stock (through the buffer) and the knob can slow a limited product, nothing can
+make it faster. At the limit the
 rate is 0, and `withinLimit()` (taken + open < limit) is re-checked at the moment of release, so a sale that lands
 between the check and the release cannot push it over. Every tick the cron also trims open stock back to
 `limit − taken` for every limited product, including one-shot batches that are not dripped, because a cancelled

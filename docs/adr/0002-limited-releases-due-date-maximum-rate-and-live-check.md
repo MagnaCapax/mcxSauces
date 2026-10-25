@@ -52,3 +52,12 @@ published engine, so that the open code still describes what the live campaign d
 - `whmcs/eternal-vainamoinen/README.md` — "Limited releases" and "Check the live campaign".
 - `whmcs/eternal-vainamoinen/EternalVainamoinenReleaseTest.php` — limited-release tests.
 - [ADR-0001](0001-architecture-layout-and-languages.md) — layout; `whmcs/eternal-vainamoinen/` now also holds `verify-live-feed.php`.
+
+## Amendment 2026-10-25: the open-stock buffer counts only the limited product's own stock
+
+The global open-stock buffer (`factorGlobalOpen`, total unsold stock near 50) also slowed limited products. With
+other products' unsold stock near the buffer, a limited product ran at a fraction of its maximum and could not reach
+its due date; a large manual restock of another product stopped it entirely. The live drip now gives a limited
+product's pacing its own open stock as the buffer input, so other products' stock cannot hold it back. Its maximum
+rate, the hard limit, the capacity and over-supply checks, the operator knob and the one-release-per-tick rule are
+unchanged. The simulator and README follow the same rule.

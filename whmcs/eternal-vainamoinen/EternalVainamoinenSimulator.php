@@ -179,7 +179,8 @@ final class EternalVainamoinenSimulator
                 if ($s === 'limited') {
                     // the cron's limited pacing: limit − claimed − open spread to the due date; also the ceiling
                     $r    = EternalVainamoinenRelease::limitedRate($limit, $streamActive, $openSlots, $secLeft, (float) $this->intervalSeconds);
-                    $pace = new Pacing([$r], $totalRemain, (float) $globalOpen, $r);
+                    // the buffer governor reads the limited SKU's OWN open stock, not the global total (live cron since 2026-10-25)
+                    $pace = new Pacing([$r], $totalRemain, (float) $openSlots, $r);
                 } else {
                     // the cron's stream pacing: one mean rate, remaining over the time left
                     $r    = EternalVainamoinenRelease::rate($totalRemain, $secLeft, (float) $this->intervalSeconds);
