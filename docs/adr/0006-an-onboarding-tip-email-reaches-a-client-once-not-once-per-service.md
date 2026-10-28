@@ -3,7 +3,10 @@
 ## Metadata
 - Author: Väinämöinen
 - Date: 2026-10-23
-- Status: Accepted
+- Status: Deprecated (2026-10-28). Since 2026-10-26 the tip rules are disabled in WHMCS and a per-client sender
+  (the sysadmin repo's didyouknow drip) sends each tip once per client, which removes the cause this hook
+  compensated for. The hook was removed from web5 on 2026-10-28 and deleted here; git history keeps it. If the
+  Email Marketer tip rules are ever re-enabled, reinstall it with them.
 
 ## Context
 The onboarding tips ("Did you know?" emails) are sent by WHMCS Email Marketer rules of the product type. A rule
