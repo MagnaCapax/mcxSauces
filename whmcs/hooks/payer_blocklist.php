@@ -17,9 +17,9 @@
  * Common names collide: one shop already had 13 unrelated customers sharing the
  * surname of a single fraudster. So a NAME match on its own never blocks
  * anything. It is only logged ("flag") for a human to review. A block needs the
- * name AND a second identifier from the same list entry (the payer ID or the
- * email). Forcing extra friction on legitimate buyers costs sales, so a flag is
- * invisible to the customer.
+ * name AND a second identifier from the same list entry (the payer ID, the
+ * email, the street address or the phone number; ADR-0008). Forcing extra
+ * friction on legitimate buyers costs sales, so a flag is invisible to the customer.
  *
  * WHAT THIS HOOK DOES
  * -------------------
@@ -28,15 +28,16 @@
  *     holds a new product or addon -> order refused with the same generic message,
  *     whatever the list says and even when the list file is missing; a cart that
  *     only renews or pays for what the client already has is never refused
- *     name + email match an entry -> order refused with a generic message
- *     name only                   -> flag (logged), order proceeds
+ *     name + (email, address or phone) match an entry -> order refused with a generic message
+ *     name only (or one other identifier only)        -> flag (logged), order proceeds
  *   PreModuleCreate (after payment, before provisioning):
  *     client in the blacklist group -> provisioning aborted, whatever the list says
  *       and even when the list file is missing; an internal client note (once per
  *       service) and an Activity Log line are written; no refund (operator ruling
  *       23/10/2026). Renewals and invoice payments never reach this hook, so a
  *       blacklisted client can still pay for what it holds
- *     the paying PayPal account's name + payer ID (or payer email) match an entry
+ *     the paying PayPal account's name + payer ID (or payer email), or the account
+ *     name + its address or phone, match an entry
  *       -> provisioning aborted (abortcmd), an internal client note and an
  *          Activity Log line are written so staff can return the payment and
  *          close the account
@@ -45,8 +46,9 @@
  * THE LIST FILE
  * -------------
  * JSON, readable by the web user, kept OUTSIDE the web root:
- *   {"v":1,"salt":"<hex>","entries":[{"id":"E1","n":["<hash>",...],"e":["<hash>"],"p":["<hash>"]}]}
- * It holds salted SHA-256 hashes only, never a raw name, email or payer ID, so a
+ *   {"v":1,"salt":"<hex>","entries":[{"id":"E1","n":["<hash>",...],"e":["<hash>"],"p":["<hash>"],
+ *     "a":["<hash>"],"t":["<hash>"]}]}   (a = street address, t = phone; both optional)
+ * It holds salted SHA-256 hashes only, never a raw name, email, payer ID, address or phone, so a
  * copy of the file does not reveal who is on it without the salt and a guess.
  * Name keys are the unordered PAIRS of a normalized name's tokens, so the PayPal
  * legal name "Ana Maria Lopez Diaz" still matches a checkout name "Ana Lopez".
@@ -148,6 +150,34 @@ function pm_pbl_payer_key(string $payerId, string $salt): string
     return $p === '' ? '' : hash('sha256', $salt . '|p|' . $p);
 }
 
+/**
+ * Street address line (address1): accents stripped and lowercased as for names, letters and digits kept, every other
+ * run of characters one space. Under 6 characters gives no key (ADR-0008). Postcode and city are left out: a
+ * returning buyer keeps the street line and varies the rest.
+ */
+function pm_pbl_address_key(string $address, string $salt): string
+{
+    $s = mb_substr($address, 0, 256, 'UTF-8');
+    if (class_exists('Normalizer')) {
+        $n = \Normalizer::normalize($s, \Normalizer::FORM_D);
+        if (is_string($n)) {
+            $s = preg_replace('/\p{Mn}+/u', '', $n) ?? $s;
+        }
+    }
+    $s = trim(preg_replace('/[^\p{L}\p{N}]+/u', ' ', mb_strtolower($s, 'UTF-8')) ?? '');
+    return mb_strlen($s, 'UTF-8') < 6 ? '' : hash('sha256', $salt . '|a|' . $s);
+}
+
+/**
+ * Phone number: digits only, the last 8 kept, so "+60.12 345 6789", "60123456789" and "012-345 6789" give one key
+ * whatever country-code or trunk prefix was typed. Under 8 digits gives no key (ADR-0008).
+ */
+function pm_pbl_phone_key(string $phone, string $salt): string
+{
+    $d = preg_replace('/\D+/', '', substr($phone, 0, 64)) ?? '';
+    return strlen($d) < 8 ? '' : hash('sha256', $salt . '|t|' . substr($d, -8));
+}
+
 /** Load and validate the list; null when absent or malformed (callers then ALLOW). */
 function pm_pbl_load(string $file = PM_PAYER_BLOCKLIST_FILE): ?array
 {
@@ -164,30 +194,33 @@ function pm_pbl_load(string $file = PM_PAYER_BLOCKLIST_FILE): ?array
 
 /**
  * Compare identifiers against the list. Returns the strongest hit:
- *   ['decision' => 'block'|'flag'|'none', 'entry' => id|null, 'name' => bool, 'email' => bool, 'payer' => bool]
- * block = name AND (payer OR email) on the SAME entry; flag = any single identifier.
+ *   ['decision' => 'block'|'flag'|'none', 'entry' => id|null, 'name' => bool, 'email' => bool, 'payer' => bool,
+ *    'address' => bool, 'phone' => bool]
+ * block = name AND (payer OR email OR address OR phone) on the SAME entry; flag = any single identifier.
  */
-function pm_pbl_match(array $list, string $name, string $email, string $payerId): array
+function pm_pbl_match(array $list, string $name, string $email, string $payerId, string $address = '', string $phone = ''): array
 {
     $salt = $list['salt'];
     $nameKeys = pm_pbl_name_keys($name, $salt);
-    $emailKey = pm_pbl_email_key($email, $salt);
-    $payerKey = pm_pbl_payer_key($payerId, $salt);
-    $best = ['decision' => 'none', 'entry' => null, 'name' => false, 'email' => false, 'payer' => false];
+    $keys = ['email' => [pm_pbl_email_key($email, $salt), 'e'], 'payer' => [pm_pbl_payer_key($payerId, $salt), 'p'],
+        'address' => [pm_pbl_address_key($address, $salt), 'a'], 'phone' => [pm_pbl_phone_key($phone, $salt), 't']];
+    $best = ['decision' => 'none', 'entry' => null, 'name' => false, 'email' => false, 'payer' => false,
+        'address' => false, 'phone' => false];
     foreach ($list['entries'] as $entry) {
         if (!is_array($entry)) {
             continue;
         }
-        $hitName = (bool) array_intersect($nameKeys, (array) ($entry['n'] ?? []));
-        $hitEmail = $emailKey !== '' && in_array($emailKey, (array) ($entry['e'] ?? []), true);
-        $hitPayer = $payerKey !== '' && in_array($payerKey, (array) ($entry['p'] ?? []), true);
-        if (!$hitName && !$hitEmail && !$hitPayer) {
+        $hit = ['name' => (bool) array_intersect($nameKeys, (array) ($entry['n'] ?? []))];
+        foreach ($keys as $field => [$key, $slot]) {
+            $hit[$field] = $key !== '' && in_array($key, (array) ($entry[$slot] ?? []), true);
+        }
+        if (!in_array(true, $hit, true)) {
             continue;
         }
-        $decision = ($hitName && ($hitEmail || $hitPayer)) ? 'block' : 'flag';
+        $second = $hit['email'] || $hit['payer'] || $hit['address'] || $hit['phone'];
+        $decision = ($hit['name'] && $second) ? 'block' : 'flag';
         if ($best['decision'] !== 'block') {
-            $best = ['decision' => $decision, 'entry' => (string) ($entry['id'] ?? '?'),
-                'name' => $hitName, 'email' => $hitEmail, 'payer' => $hitPayer];
+            $best = ['decision' => $decision, 'entry' => (string) ($entry['id'] ?? '?')] + $hit;
         }
     }
     return $best;
@@ -327,11 +360,12 @@ function pm_pbl_payer_for_service(int $serviceId): ?array
 }
 
 /** Strongest match over every name we know for this buyer (PayPal's verified name first, then the account name). */
-function pm_pbl_match_any(array $list, array $names, string $email, string $payerId): array
+function pm_pbl_match_any(array $list, array $names, string $email, string $payerId, string $address = '', string $phone = ''): array
 {
-    $best = ['decision' => 'none', 'entry' => null, 'name' => false, 'email' => false, 'payer' => false];
+    $best = ['decision' => 'none', 'entry' => null, 'name' => false, 'email' => false, 'payer' => false,
+        'address' => false, 'phone' => false];
     foreach ($names as $n) {
-        $r = pm_pbl_match($list, (string) $n, $email, $payerId);
+        $r = pm_pbl_match($list, (string) $n, $email, $payerId, $address, $phone);
         if ($r['decision'] === 'block') {
             return $r;
         }
@@ -399,11 +433,15 @@ if (function_exists('add_hook') && defined('ROOTDIR')) {
             $clientId = (int) ($vars['clientId'] ?? $vars['userid'] ?? 0);
             $name = trim(($vars['firstname'] ?? '') . ' ' . ($vars['lastname'] ?? ''));
             $email = (string) ($vars['email'] ?? '');
+            $address = (string) ($vars['address1'] ?? '');
+            $phone = (string) ($vars['phonenumber'] ?? '');
             if ($clientId > 0) {
-                $c = \WHMCS\Database\Capsule::table('tblclients')->where('id', $clientId)->first(['firstname', 'lastname', 'email', 'groupid']);
+                $c = \WHMCS\Database\Capsule::table('tblclients')->where('id', $clientId)->first(['firstname', 'lastname', 'email', 'address1', 'phonenumber', 'groupid']);
                 if ($c) {
                     $name = trim($c->firstname . ' ' . $c->lastname);
                     $email = (string) $c->email;
+                    $address = (string) $c->address1;
+                    $phone = (string) $c->phonenumber;
                     $cart = class_exists('\WHMCS\Session') ? \WHMCS\Session::get('cart') : null;
                     if (!is_array($cart)) {
                         $cart = $_SESSION['cart'] ?? [];
@@ -419,14 +457,15 @@ if (function_exists('add_hook') && defined('ROOTDIR')) {
             if ($list === null) {
                 return '';
             }
-            $r = pm_pbl_match_any($list, [$name], $email, '');
+            $r = pm_pbl_match_any($list, [$name], $email, '', $address, $phone);
             if ($r['decision'] === 'none') {
                 return '';
             }
             pm_pbl_log('match', ['stage' => 'checkout', 'decision' => $r['decision'], 'entry' => $r['entry'],
-                'client_id' => $clientId, 'name' => $r['name'], 'email' => $r['email']]);
-            logActivity(sprintf('PAYER-BLOCKLIST %s at checkout: entry %s, client_id=%d, matched name=%s email=%s',
-                strtoupper($r['decision']), $r['entry'], $clientId, $r['name'] ? 'yes' : 'no', $r['email'] ? 'yes' : 'no'));
+                'client_id' => $clientId, 'name' => $r['name'], 'email' => $r['email'], 'address' => $r['address'], 'phone' => $r['phone']]);
+            logActivity(sprintf('PAYER-BLOCKLIST %s at checkout: entry %s, client_id=%d, matched name=%s email=%s address=%s phone=%s',
+                strtoupper($r['decision']), $r['entry'], $clientId, $r['name'] ? 'yes' : 'no', $r['email'] ? 'yes' : 'no',
+                $r['address'] ? 'yes' : 'no', $r['phone'] ? 'yes' : 'no'));
             return $r['decision'] === 'block' ? PM_PAYER_BLOCKLIST_BLOCK_MESSAGE : '';
         } catch (\Throwable $e) {
             error_log('payer_blocklist: checkout check failed, order allowed: ' . $e->getMessage());
@@ -462,16 +501,17 @@ if (function_exists('add_hook') && defined('ROOTDIR')) {
             $payer = pm_pbl_payer_for_service($serviceId);
             $names = $payer ? [$payer['name'], $accountName] : [$accountName];
             $email = $payer ? $payer['email'] : (string) ($client['email'] ?? '');
-            $r = pm_pbl_match_any($list, $names, $email, $payer ? $payer['payer_id'] : '');
+            $r = pm_pbl_match_any($list, $names, $email, $payer ? $payer['payer_id'] : '',
+                (string) ($client['address1'] ?? ''), (string) ($client['phonenumber'] ?? ''));
             if ($r['decision'] === 'none') {
                 return [];
             }
             pm_pbl_log('match', ['stage' => 'provision', 'decision' => $r['decision'], 'entry' => $r['entry'],
                 'client_id' => $clientId, 'service_id' => $serviceId, 'payer_source' => $payer['source'] ?? 'none',
-                'name' => $r['name'], 'email' => $r['email'], 'payer' => $r['payer']]);
-            $line = sprintf('PAYER-BLOCKLIST %s at provisioning: service %d, entry %s, matched name=%s email=%s payer_id=%s',
+                'name' => $r['name'], 'email' => $r['email'], 'payer' => $r['payer'], 'address' => $r['address'], 'phone' => $r['phone']]);
+            $line = sprintf('PAYER-BLOCKLIST %s at provisioning: service %d, entry %s, matched name=%s email=%s payer_id=%s address=%s phone=%s',
                 strtoupper($r['decision']), $serviceId, $r['entry'], $r['name'] ? 'yes' : 'no', $r['email'] ? 'yes' : 'no',
-                $r['payer'] ? 'yes' : 'no');
+                $r['payer'] ? 'yes' : 'no', $r['address'] ? 'yes' : 'no', $r['phone'] ? 'yes' : 'no');
             logActivity($line, $clientId);
             if ($r['decision'] !== 'block') {
                 return [];

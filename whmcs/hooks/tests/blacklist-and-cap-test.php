@@ -54,6 +54,30 @@ ok(count(pm_pbl_name_tokens('김 민준')) === 2, 'Hangul: one-syllable surname 
 ok(pm_pbl_name_tokens('J. R. Tolkien') === ['tolkien'], 'Latin initials still dropped');
 ok(pm_pbl_name_keys('小明 王', 'salt-for-tests-0123456789') === pm_pbl_name_keys('王 小明', 'salt-for-tests-0123456789'), 'Han: word order does not change keys');
 
+// pm_pbl_match: name + address or name + phone blocks; one identifier alone only flags (ADR-0008). Synthetic data.
+$salt = 'salt-for-tests-0123456789';
+$list = ['v' => 1, 'salt' => $salt, 'entries' => [
+    ['id' => 'E1', 'n' => pm_pbl_name_keys('Jane Example', $salt), 'e' => [pm_pbl_email_key('old@example.test', $salt)], 'p' => [],
+        'a' => [pm_pbl_address_key('12 Sample Street', $salt)], 't' => [pm_pbl_phone_key('+99.1234 5678', $salt)]],
+    ['id' => 'E2', 'n' => pm_pbl_name_keys('Paul Legacy', $salt), 'e' => [pm_pbl_email_key('legacy@example.test', $salt)], 'p' => []],
+]];
+$m = pm_pbl_match($list, 'Jane Example', 'fresh@example.test', '', '', '+99 1234-5678');
+ok($m['decision'] === 'block' && $m['entry'] === 'E1' && $m['phone'] && !$m['email'], 'name + phone, fresh email: block');
+ok(pm_pbl_match($list, 'Jane Example', 'fresh@example.test', '', '', '0012345678')['decision'] === 'block', 'phone typed with another prefix: same key, block');
+$m = pm_pbl_match($list, 'Example Jane', 'fresh@example.test', '', '12, Sample  STREET', '');
+ok($m['decision'] === 'block' && $m['address'] && !$m['phone'], 'name + address (case, comma, spacing differ): block');
+ok(pm_pbl_match($list, 'Jane Example', 'old@example.test', '')['decision'] === 'block', 'name + email still blocks (4-argument call unchanged)');
+$m = pm_pbl_match($list, 'Jane Example', 'fresh@example.test', '', '1 Other Road', '+99 8765 4321');
+ok($m['decision'] === 'flag' && $m['name'] && !$m['address'] && !$m['phone'], 'name only: flag');
+ok(pm_pbl_match($list, 'Other Person', 'fresh@example.test', '', '', '+99 1234 5678')['decision'] === 'flag', 'phone only: flag');
+ok(pm_pbl_match($list, 'Other Person', 'fresh@example.test', '', '12 Sample Street', '')['decision'] === 'flag', 'address only: flag');
+ok(pm_pbl_match($list, 'Other Person', 'fresh@example.test', '', '1 Other Road', '+99 8765 4321')['decision'] === 'none', 'no hit: pass');
+$m = pm_pbl_match($list, 'Paul Legacy', 'x@example.test', '', '5 Unrelated Lane', '+99 5555 0000');
+ok($m['decision'] === 'flag' && $m['entry'] === 'E2', 'entry without a/t lists: name only flags');
+ok(pm_pbl_phone_key('1234567', $salt) === '' && pm_pbl_phone_key('', $salt) === '', 'under 8 digits: no phone key');
+ok(pm_pbl_address_key('No 1', $salt) === '' && pm_pbl_address_key('', $salt) === '', 'under 6 characters: no address key');
+ok(pm_pbl_match_any($list, ['Nobody Here', 'Jane Example'], 'fresh@example.test', '', '', '12345678')['decision'] === 'block', 'match_any passes address and phone on');
+
 // pm_ppc_at_cap: same arithmetic as checkout, one more service on top of what is held.
 $caps = [374 => 1, 375 => 2];
 $held = function (int $n): callable {
