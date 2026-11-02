@@ -1,6 +1,6 @@
 <?php
 /**
- * WHMCS Hook: Silent auto-close tickets from blacklisted clients (groupid=9).
+ * WHMCS Hook: Hand blacklisted tickets to the administrative notice processor.
  *
  * WHY THIS EXISTS
  * ---------------
@@ -17,7 +17,8 @@
  * refunds, or appealing the closure. Manual handling of these tickets
  * is high-volume low-value work: the answer is always the same (the
  * decision is final) and engagement with banned actors carries no
- * business benefit. This hook eliminates the engagement entirely.
+ * business benefit. The ticket processor permits only a fixed administrative
+ * notice, never ordinary support, and verifies closure after notice acceptance.
  *
  * WHAT THIS HOOK DOES
  * -------------------
@@ -25,22 +26,23 @@
  * (reply from any client to existing ticket), checks if the client
  * is in WHMCS group 9 (BLACKLIST). If so:
  *
- *   1. Sets ticket status to Closed via direct Capsule update.
- *      No AddTicketReply call — no customer-facing message is sent,
- *      no customer email notification is triggered.
+ *   1. Leaves WHMCS's ticket status and last-reply timestamp untouched.
+ *      Closing here used to hide the ticket from the notice processor.
  *   2. Adds an internal admin note (NOT client-visible) recording
- *      the auto-close action for audit trail.
- *   3. Records the action via WHMCS logActivity() so the auto-close
+ *      that ticket disposition remains with the notice processor.
+ *   3. Records the handoff via WHMCS logActivity() so the event
  *      appears in the standard WHMCS Activity Log (Utilities →
  *      Logs → Activity Log).
  *
  * Non-blacklisted clients (groupid != 9) are untouched.
  *
- * No customer-facing message is sent. The client sees their ticket
- * transition to Closed status in the panel. No support engagement
- * occurs.
+ * Deploy only with a ticket processor that checks the live blacklist,
+ * sends its fixed ban notice once per ticket and verifies closure.
+ * It must route legal/privacy requests for review instead of auto-closing.
+ * This hook sends nothing itself, does not bypass processing holds and
+ * never treats a handoff note as proof that a notice was sent.
  *
- * GDPR / Finnish accounting law context
+ * Historical rationale for the former silent-close behaviour (not a gate)
  * -------------------------------------
  * GDPR Art. 17 erasure cannot force deletion of the blacklist record:
  *   - Finnish Accounting Act 1336/1997 § 10 mandates 6-10y retention
@@ -70,10 +72,6 @@
  */
 
 use WHMCS\Database\Capsule;
-
-if (!defined('WHMCS')) {
-    die('This file cannot be accessed directly');
-}
 
 /**
  * The BLACKLIST client group ID in WHMCS.
@@ -117,11 +115,11 @@ function pm_autoclose_is_blacklisted($clientid) {
 }
 
 /**
- * Silently close a ticket and record an audit trail.
+ * Record a pending disposition without assuming whether a notice was sent.
  *
- * Direct Capsule UPDATE on tbltickets — bypasses AddTicketReply,
- * so no customer-visible reply is posted and no customer email is
- * triggered by WHMCS.
+ * The notice processor owns sending and closure together. A direct Closed
+ * update here would bypass it; forcing In Progress would lower the urgency
+ * of a native Customer-Reply event and could change processing holds.
  *
  * Internal admin note is written to tblticketnotes (NOT client-visible).
  *
@@ -129,33 +127,27 @@ function pm_autoclose_is_blacklisted($clientid) {
  * @param int    $clientid
  * @param string $event 'TicketOpen' or 'TicketUserReply'
  */
-function pm_autoclose_close_ticket($ticketid, $clientid, $event) {
+function blacklistedTicketDispositionPending($ticketid, $clientid, $event) {
     if (!$ticketid) {
         return;
     }
     try {
-        Capsule::table('tbltickets')
-            ->where('id', (int) $ticketid)
-            ->update([
-                'status'    => 'Closed',
-                'lastreply' => Capsule::raw('NOW()'),
-            ]);
-
         Capsule::table('tblticketnotes')->insert([
             'ticketid' => (int) $ticketid,
             'date'     => Capsule::raw('NOW()'),
-            'admin'    => 'Auto-close (groupid=9)',
+            'admin'    => 'Blacklist disposition pending',
             'message'  => sprintf(
-                'AUTOCLOSE: client.groupid=%d (BLACKLIST). Event=%s. '
-                . 'Ticket closed silently per blacklisted-user policy. '
-                . 'No customer-facing reply sent.',
+                'BLACKLIST HANDOFF: client.groupid=%d (BLACKLIST). Event=%s. '
+                . 'Status unchanged for the ticket processor: fixed notice then verified closure, '
+                . 'or legal/privacy review. Prior delivery not evaluated. '
+                . 'No customer-facing reply sent by this hook.',
                 PM_BLACKLIST_GROUP_ID,
                 $event
             ),
         ]);
     } catch (\Exception $e) {
         error_log(sprintf(
-            'autoclose_blacklisted_tickets: close failed tid=%d cid=%d: %s',
+            'autoclose_blacklisted_tickets: pending-note failed tid=%d cid=%d: %s',
             $ticketid, $clientid, $e->getMessage()
         ));
         return;
@@ -164,7 +156,7 @@ function pm_autoclose_close_ticket($ticketid, $clientid, $event) {
     // WHMCS-native activity log (Utilities → Logs → Activity Log).
     if (function_exists('logActivity')) {
         logActivity(sprintf(
-            'autoclose_blacklisted_tickets: %s tid=%d cid=%d groupid=%d',
+            'autoclose_blacklisted_tickets: disposition pending %s tid=%d cid=%d groupid=%d',
             $event, (int) $ticketid, (int) $clientid, PM_BLACKLIST_GROUP_ID
         ));
     }
@@ -177,12 +169,13 @@ function pm_autoclose_close_ticket($ticketid, $clientid, $event) {
  * $vars includes ticketid, userid, deptid, subject, message, priority,
  * status, etc.
  */
+if (function_exists('add_hook') && defined('ROOTDIR')) {
 add_hook('TicketOpen', 1, function ($vars) {
     $clientid = (int) ($vars['userid'] ?? 0);
     if (!pm_autoclose_is_blacklisted($clientid)) {
         return;
     }
-    pm_autoclose_close_ticket(
+    blacklistedTicketDispositionPending(
         (int) ($vars['ticketid'] ?? 0),
         $clientid,
         'TicketOpen'
@@ -192,9 +185,9 @@ add_hook('TicketOpen', 1, function ($vars) {
 /**
  * Hook: TicketUserReply
  *
- * Fires when a client adds a reply to an existing ticket. Re-closes
- * the ticket if a blacklisted client replies to a previously-closed
- * ticket they own (WHMCS reopens tickets on user reply by default).
+ * Fires when a client adds a reply to an existing ticket. Preserves the
+ * native reopened status, including when a notice was already sent:
+ * the processor must then verify closure without sending another notice.
  *
  * $vars includes ticketid, userid, message, attachments, etc.
  */
@@ -203,9 +196,10 @@ add_hook('TicketUserReply', 1, function ($vars) {
     if (!pm_autoclose_is_blacklisted($clientid)) {
         return;
     }
-    pm_autoclose_close_ticket(
+    blacklistedTicketDispositionPending(
         (int) ($vars['ticketid'] ?? 0),
         $clientid,
         'TicketUserReply'
     );
 });
+}
