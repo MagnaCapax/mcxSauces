@@ -11,6 +11,7 @@ namespace WHMCS\Database {
     final class Capsule
     {
         public static array $clients = [];
+        public static array $tickets = [];
         public static array $notes = [];
         public static bool $lookupFails = false;
         public static bool $noteFails = false;
@@ -20,13 +21,31 @@ namespace WHMCS\Database {
     }
     final class Query
     {
-        private int $clientId = 0;
+        private array $wheres = [];
         public function __construct(private string $table) {}
-        public function where(string $field, mixed $value): self { $this->clientId = (int) $value; return $this; }
+        public function where(string $field, mixed $value): self { $this->wheres[$field] = $value; return $this; }
+        public function limit(int $count): self { return $this; }
         public function first(array $fields): ?object
         {
             if (Capsule::$lookupFails) { throw new \RuntimeException('synthetic lookup failure'); }
-            return Capsule::$clients[$this->clientId] ?? null;
+            return Capsule::$clients[(int) ($this->wheres['id'] ?? 0)] ?? null;
+        }
+        public function value(string $field): mixed
+        {
+            if (Capsule::$lookupFails) { throw new \RuntimeException('synthetic lookup failure'); }
+            if ($this->table !== 'tbltickets' || $field !== 'email') { throw new \RuntimeException('unexpected value read'); }
+            return Capsule::$tickets[(int) ($this->wheres['id'] ?? 0)] ?? null;
+        }
+        public function pluck(string $field): array
+        {
+            if (Capsule::$lookupFails) { throw new \RuntimeException('synthetic lookup failure'); }
+            if ($this->table !== 'tblclients' || $field !== 'id') { throw new \RuntimeException('unexpected pluck'); }
+            $wanted = strtolower((string) ($this->wheres['email'] ?? ''));
+            $ids = [];
+            foreach (Capsule::$clients as $client) {
+                if (strtolower((string) ($client->email ?? '')) === $wanted) { $ids[] = $client->id; }
+            }
+            return $ids;
         }
         public function insert(array $row): bool
         {
@@ -99,8 +118,13 @@ namespace {
     define('WHMCS', true);
     require $hookFile;
     verify(array_keys($hooks) === ['TicketOpen', 'TicketUserReply'], 'both native events registered');
-    Capsule::$clients = [21 => (object) ['id' => 21, 'groupid' => 9],
-        22 => (object) ['id' => 22, 'groupid' => 1]];
+    Capsule::$clients = [21 => (object) ['id' => 21, 'groupid' => 9, 'email' => 'banned@example.invalid'],
+        22 => (object) ['id' => 22, 'groupid' => 1, 'email' => 'ordinary@example.invalid'],
+        24 => (object) ['id' => 24, 'groupid' => 9, 'email' => 'shared@example.invalid'],
+        25 => (object) ['id' => 25, 'groupid' => 1, 'email' => 'shared@example.invalid']];
+    // Guest tickets: 41 from the banned client's address, 42 ordinary, 43 shared by two accounts, 44 unknown.
+    Capsule::$tickets = [31 => '', 41 => 'Banned@Example.invalid', 42 => 'ordinary@example.invalid',
+        43 => 'shared@example.invalid', 44 => 'stranger@example.invalid'];
     $open = ['ticketid' => 31, 'userid' => 21, 'status' => 'Open', 'subject' => 'ordinary request'];
     journey('new banned ticket stays Open for first notice', 'TicketOpen', $open, true);
     journey('banned reply stays Customer-Reply', 'TicketUserReply', array_replace($open, ['status' => 'Customer-Reply']), true);
@@ -115,6 +139,14 @@ namespace {
     journey('missing ticket cannot create an audit note', 'TicketOpen', ['userid' => 21], false);
     journey('failed group lookup leaves ticket visible', 'TicketOpen', $open, false, true);
     journey('failed audit does not close or log success', 'TicketUserReply', $open, false, false, true);
+    $guest = ['ticketid' => 41, 'userid' => 0, 'status' => 'Open', 'subject' => 'Account closed'];
+    journey('guest ticket from a blacklisted client address gets the handoff note', 'TicketOpen', $guest, true);
+    journey('guest reply from a blacklisted client address gets the handoff note', 'TicketUserReply',
+        array_replace($guest, ['status' => 'Customer-Reply']), true);
+    journey('guest from an ordinary client address untouched', 'TicketOpen', array_replace($guest, ['ticketid' => 42]), false);
+    journey('guest address shared by two accounts is not blacklist proof', 'TicketOpen', array_replace($guest, ['ticketid' => 43]), false);
+    journey('guest address with no account untouched', 'TicketUserReply', array_replace($guest, ['ticketid' => 44]), false);
+    journey('failed guest lookup leaves ticket visible', 'TicketOpen', $guest, false, true);
     echo "Blacklist hook: $passed journeys passed\n";
     if (!$mutationChild) {
         // Restoring the old Closed write must fail the actual callback journey.

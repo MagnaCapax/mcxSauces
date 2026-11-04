@@ -24,7 +24,8 @@
  * -------------------
  * On TicketOpen (new ticket from any client) and TicketUserReply
  * (reply from any client to existing ticket), checks if the client
- * is in WHMCS group 9 (BLACKLIST). If so:
+ * is in WHMCS group 9 (BLACKLIST). A guest ticket (no client) is checked
+ * through the one client whose email is its sender address (ADR-0010). If so:
  *
  *   1. Leaves WHMCS's ticket status and last-reply timestamp untouched.
  *      Closing here used to hide the ticket from the notice processor.
@@ -115,6 +116,52 @@ function pm_autoclose_is_blacklisted($clientid) {
 }
 
 /**
+ * Client behind a guest ticket (userid 0): the one client whose email is the
+ * ticket's sender address, of any status. A closed account cannot log in, so
+ * after closure its tickets arrive by email as guest tickets; without this the
+ * hook never sees them (ADR-0010). Guest attribution itself is not changed.
+ *
+ * Zero or several matching clients, or any DB error, answer 0: no note.
+ *
+ * @param int $ticketid
+ * @return int client id, or 0
+ */
+function pm_autoclose_guest_client_id($ticketid) {
+    if ((int) $ticketid <= 0) {
+        return 0;
+    }
+    try {
+        $email = strtolower(trim((string) Capsule::table('tbltickets')
+            ->where('id', (int) $ticketid)
+            ->value('email')));
+        if ($email === '') {
+            return 0;
+        }
+        $ids = Capsule::table('tblclients')->where('email', $email)->limit(2)->pluck('id');
+    } catch (\Exception $e) {
+        error_log(sprintf(
+            'autoclose_blacklisted_tickets: guest lookup failed tid=%d: %s',
+            $ticketid, $e->getMessage()
+        ));
+        return 0;
+    }
+    $ids = is_object($ids) && method_exists($ids, 'all') ? $ids->all() : (array) $ids;
+    return count($ids) === 1 ? (int) reset($ids) : 0;
+}
+
+/**
+ * Client to check for an event: the ticket's own client, or for a guest
+ * ticket the single client owning the sender address.
+ *
+ * @param array $vars hook variables
+ * @return int
+ */
+function pm_autoclose_event_client_id(array $vars) {
+    $clientid = (int) ($vars['userid'] ?? 0);
+    return $clientid > 0 ? $clientid : pm_autoclose_guest_client_id((int) ($vars['ticketid'] ?? 0));
+}
+
+/**
  * Record a pending disposition without assuming whether a notice was sent.
  *
  * The notice processor owns sending and closure together. A direct Closed
@@ -171,7 +218,7 @@ function blacklistedTicketDispositionPending($ticketid, $clientid, $event) {
  */
 if (function_exists('add_hook') && defined('ROOTDIR')) {
 add_hook('TicketOpen', 1, function ($vars) {
-    $clientid = (int) ($vars['userid'] ?? 0);
+    $clientid = pm_autoclose_event_client_id($vars);
     if (!pm_autoclose_is_blacklisted($clientid)) {
         return;
     }
@@ -192,7 +239,7 @@ add_hook('TicketOpen', 1, function ($vars) {
  * $vars includes ticketid, userid, message, attachments, etc.
  */
 add_hook('TicketUserReply', 1, function ($vars) {
-    $clientid = (int) ($vars['userid'] ?? 0);
+    $clientid = pm_autoclose_event_client_id($vars);
     if (!pm_autoclose_is_blacklisted($clientid)) {
         return;
     }
