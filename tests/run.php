@@ -163,7 +163,7 @@ namespace {
                 'restored premature Closed write is caught by the journey');
             echo "Mutation: premature closure rejected\n";
         } finally { unlink($mutationFile); }
-        foreach (['blacklist-and-cap-test.php', 'loginRememberMeDefaultTest.php'] as $test) {
+        foreach (['blacklist-and-cap-test.php', 'loginRememberMeDefaultTest.php', 'promo-once-per-client-test.php'] as $test) {
             passthru(escapeshellarg(PHP_BINARY) . ' ' . escapeshellarg(dirname(__DIR__) . '/whmcs/hooks/tests/' . $test), $exit);
             verify($exit === 0, "$test regression passed");
         }
