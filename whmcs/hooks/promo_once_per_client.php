@@ -16,13 +16,17 @@
  *     with that code (Pending or Active; an unpaid order counts), checkout is refused with a message
  *     naming the code, and an Activity Log line is written.
  *   Guests (no account yet) have no orders, so they pass.
- *   pm_poc_decide() is pure, so a CLI tool or a test can ask the same question without WHMCS.
+ *   Shared cap: when the cart's code belongs to a "caps" group and the group's codes have together been
+ *   used "max" times or more (WHMCS's own per-code use counters, summed), checkout is refused for
+ *   everyone, guests included. One campaign sold under several codes then stops at one total.
+ *   pm_poc_decide() and pm_poc_cap_decide() are pure, so a CLI tool or a test can ask the same question
+ *   without WHMCS.
  *
  * THE CONFIG FILE
  * ---------------
  * JSON, readable by the web user, kept OUTSIDE the web root:
- *   {"v":1,"codes":["CODE1","CODE2"]}
- * Codes are compared case-insensitively. An empty list turns the hook into a no-op.
+ *   {"v":1,"codes":["CODE1","CODE2"],"caps":[{"codes":["CODE1","CODE2","CODE3"],"max":100}]}
+ * Codes are compared case-insensitively. "caps" is optional. Empty lists turn the hook into a no-op.
  *
  * LIMITS (by design, documented rather than hidden)
  * -------------------------------------------------
@@ -32,7 +36,9 @@
  *   the API (AddOrder) are not, so staff can make exceptions.
  * - Orders in any other status (Cancelled, Fraud) do not count: a cancelled order frees the code.
  * - Two checkouts by the same customer in the same second can both pass; the second order is visible
- *   to staff and can be cancelled.
+ *   to staff and can be cancelled. Likewise two checkouts at the last free use of a shared cap.
+ * - The shared cap counts uses as WHMCS does for a code's own maximum: a cancelled order does not give
+ *   its use back.
  *
  * FAILURE MODE
  * ------------
@@ -64,24 +70,93 @@ if (!function_exists('pm_poc_codes')) {
         return is_string($code) ? strtoupper(trim($code)) : '';
     }
 
-    /** Once-per-customer codes from the config file, normalized; [] when missing, unreadable or malformed. */
-    function pm_poc_codes(string $file = PM_PROMO_ONCE_FILE): array
+    /** The decoded config, or null when missing, unreadable, malformed or of another version. */
+    function pm_poc_config(string $file): ?array
     {
         if (!is_file($file)) {
-            return [];
+            return null;
         }
         $data = json_decode((string) @file_get_contents($file), true);
-        if (!is_array($data) || ($data['v'] ?? null) !== 1 || !is_array($data['codes'] ?? null)) {
-            return [];
-        }
+        return is_array($data) && ($data['v'] ?? null) === 1 ? $data : null;
+    }
+
+    /** A list of codes, normalized and deduplicated; junk entries dropped. */
+    function pm_poc_code_list(array $list): array
+    {
         $codes = [];
-        foreach ($data['codes'] as $code) {
+        foreach ($list as $code) {
             $norm = pm_poc_normalize($code);
             if ($norm !== '') {
                 $codes[$norm] = $norm;
             }
         }
         return array_values($codes);
+    }
+
+    /** Once-per-customer codes from the config file, normalized; [] when missing, unreadable or malformed. */
+    function pm_poc_codes(string $file = PM_PROMO_ONCE_FILE): array
+    {
+        $data = pm_poc_config($file);
+        return $data !== null && is_array($data['codes'] ?? null) ? pm_poc_code_list($data['codes']) : [];
+    }
+
+    /** Shared caps from the config file: list of ['codes' => normalized codes, 'max' => int >= 0]; malformed groups dropped. */
+    function pm_poc_caps(string $file = PM_PROMO_ONCE_FILE): array
+    {
+        $data = pm_poc_config($file);
+        if ($data === null || !is_array($data['caps'] ?? null)) {
+            return [];
+        }
+        $caps = [];
+        foreach ($data['caps'] as $cap) {
+            if (!is_array($cap) || !is_array($cap['codes'] ?? null) || !is_int($cap['max'] ?? null) || $cap['max'] < 0) {
+                continue;
+            }
+            $codes = pm_poc_code_list($cap['codes']);
+            if ($codes !== []) {
+                $caps[] = ['codes' => $codes, 'max' => $cap['max']];
+            }
+        }
+        return $caps;
+    }
+
+    /**
+     * Pure decision for the shared caps. $used(codes) = the summed use count of those codes.
+     * Returns ['code' => normalized cart code, 'used' => n, 'max' => cap] when the cart code's group is used up, else null.
+     */
+    function pm_poc_cap_decide(array $caps, $cartCode, callable $used): ?array
+    {
+        $code = pm_poc_normalize($cartCode);
+        if ($code === '') {
+            return null;
+        }
+        foreach ($caps as $cap) {
+            if (in_array($code, $cap['codes'], true)) {
+                $n = (int) $used($cap['codes']);
+                if ($n >= $cap['max']) {
+                    return ['code' => $code, 'used' => $n, 'max' => $cap['max']];
+                }
+            }
+        }
+        return null;
+    }
+
+    /** WHMCS's own use counters of these promotion codes, summed. Needs WHMCS. */
+    function pm_poc_used(array $codes): int
+    {
+        if ($codes === []) {
+            return 0;
+        }
+        $marks = implode(',', array_fill(0, count($codes), '?'));
+        return (int) \WHMCS\Database\Capsule::table('tblpromotions')->whereRaw("UPPER(code) IN ($marks)", $codes)->sum('uses');
+    }
+
+    /** Customer-facing message for a used-up shared cap; the code is HTML-escaped. */
+    function pm_poc_cap_message(array $row): string
+    {
+        $code = htmlspecialchars((string) $row['code'], ENT_QUOTES, 'UTF-8');
+        return sprintf('The promotion code %s is no longer available: this offer was limited to %d orders and all of them have been taken.',
+            $code, (int) $row['max']);
     }
 
     /**
@@ -122,7 +197,8 @@ if (!function_exists('pm_poc_codes')) {
         add_hook('ShoppingCartValidateCheckout', 1, function ($vars) {
             try {
                 $codes = pm_poc_codes();
-                if ($codes === []) {
+                $caps = pm_poc_caps();
+                if ($codes === [] && $caps === []) {
                     return '';
                 }
                 $cart = class_exists('\WHMCS\Session') ? \WHMCS\Session::get('cart') : null;
@@ -130,6 +206,11 @@ if (!function_exists('pm_poc_codes')) {
                     $cart = $_SESSION['cart'] ?? [];
                 }
                 $clientId = (int) ($vars['clientId'] ?? $vars['userid'] ?? 0);
+                $capRow = pm_poc_cap_decide($caps, $cart['promo'] ?? '', 'pm_poc_used');
+                if ($capRow !== null) {
+                    logActivity(sprintf('PROMO-CAP checkout refused: code %s group used %d of %d client_id=%d', $capRow['code'], $capRow['used'], $capRow['max'], $clientId));
+                    return [pm_poc_cap_message($capRow)];
+                }
                 $row = pm_poc_decide($codes, $cart['promo'] ?? '', $clientId, function (string $code) use ($clientId): int {
                     return pm_poc_held($clientId, $code);
                 });

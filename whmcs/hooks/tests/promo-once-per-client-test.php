@@ -74,10 +74,41 @@ $files[] = $p = $write('empty.json', '{"v":1,"codes":[]}');
 ok(pm_poc_codes($p) === [], 'empty list reads as no codes');
 $files[] = $p = $write('ok.json', '{"v":1,"codes":["spring-one"," Spring-Two ","SPRING-ONE","",5,null]}');
 ok(pm_poc_codes($p) === ['SPRING-ONE', 'SPRING-TWO'], 'valid config: trimmed, upper-cased, deduplicated, junk entries dropped');
+// Shared caps reader: "caps" optional; groups with a bad max or no usable codes are dropped; codes normalized.
+ok(pm_poc_caps('/nonexistent/promo-once-per-client.json') === [], 'missing config file reads as no caps');
+ok(pm_poc_caps($p) === [], 'config without a caps key reads as no caps');
+$files[] = $p = $write('caps.json', '{"v":1,"codes":["SPRING-ONE"],"caps":['
+    . '{"codes":["spring-one"," Spring-Two ","SPRING-ONE"],"max":100},'
+    . '{"codes":["X"],"max":"100"},{"codes":["X"],"max":-1},{"codes":"X","max":5},{"codes":["",null],"max":5},"junk"]}');
+ok(pm_poc_caps($p) === [['codes' => ['SPRING-ONE', 'SPRING-TWO'], 'max' => 100]], 'valid cap group kept and normalized, malformed groups dropped');
+ok(pm_poc_codes($p) === ['SPRING-ONE'], 'once-per-customer codes still read when caps are present');
 foreach ($files as $f) {
     unlink($f);
 }
 rmdir($dir);
+
+/** A use-count stub returning $n and recording the code lists it was asked about. */
+function uses(int $n, array &$asked = []): callable
+{
+    return function (array $codes) use ($n, &$asked): int {
+        $asked[] = $codes;
+        return $n;
+    };
+}
+$caps = [['codes' => ['DISC-A', 'DISC-B', 'DISC-C'], 'max' => 100]];
+$asked = [];
+ok(pm_poc_cap_decide($caps, 'OTHER', uses(500, $asked)) === null && $asked === [], 'code outside every cap group passes without a count');
+ok(pm_poc_cap_decide($caps, '', uses(500)) === null, 'empty cart code passes the cap');
+ok(pm_poc_cap_decide($caps, 'DISC-B', uses(99)) === null, '99 of 100 used: the 100th order still passes');
+ok(pm_poc_cap_decide($caps, 'DISC-B', uses(100)) === ['code' => 'DISC-B', 'used' => 100, 'max' => 100], '100 of 100 used: refused');
+ok(pm_poc_cap_decide($caps, 'DISC-C', uses(140)) === ['code' => 'DISC-C', 'used' => 140, 'max' => 100], 'over the cap: refused with the count');
+$asked = [];
+$row = pm_poc_cap_decide($caps, ' disc-a ', uses(100, $asked));
+ok($row !== null && $row['code'] === 'DISC-A' && $asked === [['DISC-A', 'DISC-B', 'DISC-C']], 'any case matches and the whole group is counted together');
+ok(pm_poc_cap_decide([['codes' => ['Z'], 'max' => 0]], 'Z', uses(0)) !== null, 'max 0 refuses every order');
+ok(pm_poc_cap_decide([], 'DISC-A', uses(1000)) === null, 'no caps configured: nothing enforced');
+$cm = pm_poc_cap_message(['code' => '<b>X</b>', 'used' => 100, 'max' => 100]);
+ok(strpos($cm, '100 orders') !== false && strpos($cm, '<b>') === false && strpos($cm, '&lt;b&gt;') !== false, 'cap message names the limit and escapes HTML');
 
 // Message: names the code, says once per customer, escapes HTML.
 $msg = pm_poc_message(['code' => 'SPRING-ONE', 'held' => 1]);
