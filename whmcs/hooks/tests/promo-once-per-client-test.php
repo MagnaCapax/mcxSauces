@@ -138,6 +138,11 @@ if ($hasCart) {
     ok(pm_poc_session_client($session([])) === 0, 'no session client: guest');
     ok(pm_poc_session_client($session(['uid' => 'x'])) === 0 && pm_poc_session_client($session(['uid' => -3])) === 0, 'junk or negative client id: guest');
 }
+// Command-line fixture for live checks: held counts come from it, and nothing touches the database.
+$GLOBALS['pm_poc_held_fixture'] = [20 => ['SPRING-ONE' => 2]];
+ok(pm_poc_held(20, 'spring-one') === 2, 'fixture: the held count for the client and code, any case');
+ok(pm_poc_held(20, 'SPRING-TWO') === 0 && pm_poc_held(21, 'SPRING-ONE') === 0, 'fixture: other code or other client holds nothing');
+unset($GLOBALS['pm_poc_held_fixture']);
 $hasSubmit = function_exists('pm_poc_is_checkout_submit');
 ok($hasSubmit, 'checkout-submit check exists');
 if ($hasSubmit) {

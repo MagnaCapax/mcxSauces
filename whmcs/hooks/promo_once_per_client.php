@@ -184,6 +184,11 @@ if (!function_exists('pm_poc_codes')) {
         if ($clientId <= 0 || $code === '') {
             return 0;
         }
+        // Command-line checks only (never a web request): a fixture of held counts, so a live check can run the
+        // cart and checkout paths as a customer holding the code without writing an order.
+        if (PHP_SAPI === 'cli' && is_array($GLOBALS['pm_poc_held_fixture'] ?? null)) {
+            return (int) ($GLOBALS['pm_poc_held_fixture'][$clientId][pm_poc_normalize($code)] ?? 0);
+        }
         return (int) \WHMCS\Database\Capsule::table('tblorders')->where('userid', $clientId)
             ->whereRaw('UPPER(promocode) = ?', [pm_poc_normalize($code)])
             ->whereIn('status', ['Pending', 'Active'])->count();
