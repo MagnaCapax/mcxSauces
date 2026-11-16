@@ -15,6 +15,10 @@
  *     if the cart's promotion code is listed in the config and the customer already has an order
  *     with that code (Pending or Active; an unpaid order counts), checkout is refused with a message
  *     naming the code, and an Activity Log line is written.
+ *   PreCalculateCartTotals (every time the cart total is worked out, before the code is read):
+ *     the same check for the logged-in client; a code they already hold is taken out of the cart,
+ *     an Activity Log line is written, and the next cart page (ClientAreaPageCart) shows the same
+ *     message. So the cart never shows a discount that checkout would refuse (ADR-0012).
  *   Guests (no account yet) have no orders, so they pass.
  *   Shared cap: when the cart's code belongs to a "caps" group and the group's codes have together been
  *   used "max" times or more (WHMCS's own per-code use counters, summed), checkout is refused for
@@ -193,7 +197,97 @@ if (!function_exists('pm_poc_codes')) {
             . 'Your account already has an order with this code (an unpaid order counts too).', $code);
     }
 
+    /**
+     * Pure decision for the cart. When the cart's code must be refused for this client, returns
+     * ['cart' => the cart without its promotion code, 'row' => the pm_poc_decide row]; else null.
+     */
+    function pm_poc_cart_strip(array $codes, array $cart, int $clientId, callable $held): ?array
+    {
+        $row = pm_poc_decide($codes, $cart['promo'] ?? '', $clientId, $held);
+        if ($row === null) {
+            return null;
+        }
+        unset($cart['promo']);
+        return ['cart' => $cart, 'row' => $row];
+    }
+
+    /** The logged-in client's id from a session getter; 0 for a guest or anything that is not a positive number. */
+    function pm_poc_session_client(callable $get): int
+    {
+        $uid = $get('uid');
+        return is_numeric($uid) && (int) $uid > 0 ? (int) $uid : 0;
+    }
+
+    /**
+     * True for the checkout form submission (a=checkout with submit or checkout set). WHMCS can work out the cart
+     * total there before it runs the checkout hooks; taking the code out at that point would place the order at
+     * full price with no message, so the checkout refusal handles that request instead.
+     */
+    function pm_poc_is_checkout_submit(array $request): bool
+    {
+        return ($request['a'] ?? '') === 'checkout' && (isset($request['submit']) || isset($request['checkout']));
+    }
+
+    /** Session key that carries one refused code to the next cart page view. */
+    if (!defined('PM_POC_NOTICE_KEY')) {
+        define('PM_POC_NOTICE_KEY', 'pm_poc_cart_notice');
+    }
+
     if (function_exists('add_hook') && defined('ROOTDIR')) {
+        // Cart totals: a code this client already holds is taken out of the cart before WHMCS reads it,
+        // so the cart never shows a discount that checkout would refuse.
+        add_hook('PreCalculateCartTotals', 1, function ($vars) {
+            try {
+                $codes = pm_poc_codes();
+                if ($codes === [] || pm_poc_is_checkout_submit($_REQUEST)) {
+                    return;
+                }
+                $hasSession = class_exists('\WHMCS\Session');
+                $get = function (string $key) use ($hasSession) {
+                    return $hasSession ? \WHMCS\Session::get($key) : ($_SESSION[$key] ?? null);
+                };
+                $clientId = pm_poc_session_client($get);
+                $cart = $get('cart');
+                if ($clientId <= 0 || !is_array($cart)) {
+                    return;
+                }
+                $out = pm_poc_cart_strip($codes, $cart, $clientId, function (string $code) use ($clientId): int {
+                    return pm_poc_held($clientId, $code);
+                });
+                if ($out === null) {
+                    return;
+                }
+                if ($hasSession) {
+                    \WHMCS\Session::set('cart', $out['cart']);
+                    \WHMCS\Session::set(PM_POC_NOTICE_KEY, $out['row']);
+                }
+                unset($_SESSION['cart']['promo']);
+                $_SESSION[PM_POC_NOTICE_KEY] = $out['row'];
+                logActivity(sprintf('PROMO-ONCE cart removed: code %s held %d client_id=%d', $out['row']['code'], $out['row']['held'], $clientId));
+            } catch (\Throwable $e) {
+                return;
+            }
+        });
+
+        // Cart page: say why the code was taken out, once.
+        add_hook('ClientAreaPageCart', 1, function ($vars) {
+            try {
+                $row = $_SESSION[PM_POC_NOTICE_KEY] ?? null;
+                if (class_exists('\WHMCS\Session')) {
+                    $row = \WHMCS\Session::get(PM_POC_NOTICE_KEY) ?: $row;
+                    \WHMCS\Session::set(PM_POC_NOTICE_KEY, null);
+                }
+                unset($_SESSION[PM_POC_NOTICE_KEY]);
+                if (!is_array($row) || !isset($row['code'])) {
+                    return [];
+                }
+                $msg = pm_poc_message($row);
+                return ['promoerrormessage' => $msg, 'errormessage' => '<li>' . $msg];
+            } catch (\Throwable $e) {
+                return [];
+            }
+        });
+
         add_hook('ShoppingCartValidateCheckout', 1, function ($vars) {
             try {
                 $codes = pm_poc_codes();

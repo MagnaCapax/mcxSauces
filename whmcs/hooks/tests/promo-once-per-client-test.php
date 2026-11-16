@@ -116,5 +116,36 @@ ok(strpos($msg, 'SPRING-ONE') !== false && strpos($msg, 'once per customer') !==
 $evil = pm_poc_message(['code' => '<script>alert("x")</script>', 'held' => 1]);
 ok(strpos($evil, '<script>') === false && strpos($evil, '&lt;script&gt;') !== false, 'message escapes HTML in the code');
 
+// Cart: a code the logged-in client already holds is taken out of the cart; everything else stays as it is.
+$hasCart = function_exists('pm_poc_cart_strip') && function_exists('pm_poc_session_client');
+ok($hasCart, 'cart-time functions exist');
+if ($hasCart) {
+    $cart = ['promo' => 'spring-one', 'products' => [['pid' => 7, 'qty' => 1]]];
+    $out = pm_poc_cart_strip($codes, $cart, 20, holds(1));
+    ok($out !== null && !array_key_exists('promo', $out['cart']), 'client holding the code: code taken out of the cart');
+    ok($out !== null && $out['cart']['products'] === $cart['products'], 'client holding the code: the products stay in the cart');
+    ok($out !== null && $out['row'] === ['code' => 'SPRING-ONE', 'held' => 1], 'client holding the code: the row names the code for the message');
+    ok(pm_poc_cart_strip($codes, $cart, 0, holds(1)) === null, 'guest: code stays');
+    ok(pm_poc_cart_strip($codes, $cart, 20, holds(0)) === null, 'client who never used the code: code stays');
+    ok(pm_poc_cart_strip($codes, ['promo' => 'OTHER-CODE'], 20, holds(3)) === null, 'code not on the list: code stays');
+    ok(pm_poc_cart_strip($codes, ['products' => []], 20, holds(3)) === null, 'cart without a code: nothing to take out');
+    $session = function (array $s): callable {
+        return function (string $k) use ($s) {
+            return $s[$k] ?? null;
+        };
+    };
+    ok(pm_poc_session_client($session(['uid' => '54'])) === 54, 'logged-in session: its client id');
+    ok(pm_poc_session_client($session([])) === 0, 'no session client: guest');
+    ok(pm_poc_session_client($session(['uid' => 'x'])) === 0 && pm_poc_session_client($session(['uid' => -3])) === 0, 'junk or negative client id: guest');
+}
+$hasSubmit = function_exists('pm_poc_is_checkout_submit');
+ok($hasSubmit, 'checkout-submit check exists');
+if ($hasSubmit) {
+    ok(pm_poc_is_checkout_submit(['a' => 'checkout', 'submit' => 'true']), 'checkout form submitted: left to the checkout refusal');
+    ok(pm_poc_is_checkout_submit(['a' => 'checkout', 'checkout' => '1']), 'checkout flag submitted: left to the checkout refusal');
+    ok(!pm_poc_is_checkout_submit(['a' => 'checkout']), 'checkout page view: code taken out as in the cart');
+    ok(!pm_poc_is_checkout_submit(['a' => 'view']) && !pm_poc_is_checkout_submit([]), 'cart view or no request: code taken out');
+}
+
 echo "promo-once-per-client: $pass passed, $fail failed\n";
 exit($fail === 0 ? 0 : 1);
