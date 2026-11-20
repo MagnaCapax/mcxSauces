@@ -29,8 +29,10 @@
  * THE CONFIG FILE
  * ---------------
  * JSON, readable by the web user, kept OUTSIDE the web root:
- *   {"v":1,"codes":["CODE1","CODE2"],"caps":[{"codes":["CODE1","CODE2","CODE3"],"max":100}]}
- * Codes are compared case-insensitively. "caps" is optional. Empty lists turn the hook into a no-op.
+ *   {"v":1,"codes":["CODE1","CODE2"],"limits":{"CODE4":5},"caps":[{"codes":["CODE1","CODE2","CODE3"],"max":100}]}
+ * Codes are compared case-insensitively. "caps" and "limits" are optional. Empty lists turn the hook into a no-op.
+ * "limits" raises the per-customer order count for a code from one to N (ADR-0013): checkout and the cart refuse
+ * the code once the customer holds N Pending/Active orders with it. A code listed there needs no "codes" entry.
  *
  * LIMITS (by design, documented rather than hidden)
  * -------------------------------------------------
@@ -97,11 +99,38 @@ if (!function_exists('pm_poc_codes')) {
         return array_values($codes);
     }
 
-    /** Once-per-customer codes from the config file, normalized; [] when missing, unreadable or malformed. */
+    /**
+     * Limited codes from the config file, normalized: the "codes" list plus every code in "limits";
+     * [] when missing, unreadable or malformed.
+     */
     function pm_poc_codes(string $file = PM_PROMO_ONCE_FILE): array
     {
         $data = pm_poc_config($file);
-        return $data !== null && is_array($data['codes'] ?? null) ? pm_poc_code_list($data['codes']) : [];
+        if ($data === null) {
+            return [];
+        }
+        $list = is_array($data['codes'] ?? null) ? $data['codes'] : [];
+        return pm_poc_code_list(array_merge($list, array_keys(pm_poc_limits($file))));
+    }
+
+    /**
+     * Per-code order limits from the config file: normalized code => int >= 1.
+     * "limits" is optional ({"CODE": 5}); an entry whose value is not a whole number of at least 1 is dropped.
+     */
+    function pm_poc_limits(string $file = PM_PROMO_ONCE_FILE): array
+    {
+        $data = pm_poc_config($file);
+        if ($data === null || !is_array($data['limits'] ?? null)) {
+            return [];
+        }
+        $limits = [];
+        foreach ($data['limits'] as $code => $max) {
+            $norm = pm_poc_normalize((string) $code);
+            if ($norm !== '' && is_int($max) && $max >= 1) {
+                $limits[$norm] = $max;
+            }
+        }
+        return $limits;
     }
 
     /** Shared caps from the config file: list of ['codes' => normalized codes, 'max' => int >= 0]; malformed groups dropped. */
@@ -165,17 +194,22 @@ if (!function_exists('pm_poc_codes')) {
 
     /**
      * Pure decision. $held(code) = Pending/Active orders the client has with that code.
-     * Returns ['code' => normalized cart code, 'held' => count] when checkout must be refused, else null.
-     * Unmapped codes, an empty cart code and guests (client id 0 or below) return null.
+     * A listed code allows one order per customer, or $limits[code] orders when that is set.
+     * Returns ['code' => normalized cart code, 'held' => count] when checkout must be refused (plus 'limit' for a
+     * code limited above one), else null. Unmapped codes, an empty cart code and guests (client id 0 or below) return null.
      */
-    function pm_poc_decide(array $codes, $cartCode, int $clientId, callable $held): ?array
+    function pm_poc_decide(array $codes, $cartCode, int $clientId, callable $held, array $limits = []): ?array
     {
         $code = pm_poc_normalize($cartCode);
         if ($code === '' || $clientId <= 0 || !in_array($code, $codes, true)) {
             return null;
         }
+        $limit = (int) ($limits[$code] ?? 1);
         $n = (int) $held($code);
-        return $n > 0 ? ['code' => $code, 'held' => $n] : null;
+        if ($n < max(1, $limit)) {
+            return null;
+        }
+        return $limit > 1 ? ['code' => $code, 'held' => $n, 'limit' => $limit] : ['code' => $code, 'held' => $n];
     }
 
     /** Orders of the client with this promotion code that count (Pending, Active). Needs WHMCS. */
@@ -198,6 +232,11 @@ if (!function_exists('pm_poc_codes')) {
     function pm_poc_message(array $row): string
     {
         $code = htmlspecialchars((string) $row['code'], ENT_QUOTES, 'UTF-8');
+        $limit = (int) ($row['limit'] ?? 1);
+        if ($limit > 1) {
+            return sprintf('The promotion code %s can be used for up to %d orders per customer. '
+                . 'Your account already has %d orders with this code (unpaid orders count too).', $code, $limit, (int) $row['held']);
+        }
         return sprintf('The promotion code %s can only be used once per customer. '
             . 'Your account already has an order with this code (an unpaid order counts too).', $code);
     }
@@ -206,9 +245,9 @@ if (!function_exists('pm_poc_codes')) {
      * Pure decision for the cart. When the cart's code must be refused for this client, returns
      * ['cart' => the cart without its promotion code, 'row' => the pm_poc_decide row]; else null.
      */
-    function pm_poc_cart_strip(array $codes, array $cart, int $clientId, callable $held): ?array
+    function pm_poc_cart_strip(array $codes, array $cart, int $clientId, callable $held, array $limits = []): ?array
     {
-        $row = pm_poc_decide($codes, $cart['promo'] ?? '', $clientId, $held);
+        $row = pm_poc_decide($codes, $cart['promo'] ?? '', $clientId, $held, $limits);
         if ($row === null) {
             return null;
         }
@@ -258,7 +297,7 @@ if (!function_exists('pm_poc_codes')) {
                 }
                 $out = pm_poc_cart_strip($codes, $cart, $clientId, function (string $code) use ($clientId): int {
                     return pm_poc_held($clientId, $code);
-                });
+                }, pm_poc_limits());
                 if ($out === null) {
                     return;
                 }
@@ -312,7 +351,7 @@ if (!function_exists('pm_poc_codes')) {
                 }
                 $row = pm_poc_decide($codes, $cart['promo'] ?? '', $clientId, function (string $code) use ($clientId): int {
                     return pm_poc_held($clientId, $code);
-                });
+                }, pm_poc_limits());
                 if ($row === null) {
                     return '';
                 }

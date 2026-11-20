@@ -152,5 +152,36 @@ if ($hasSubmit) {
     ok(!pm_poc_is_checkout_submit(['a' => 'view']) && !pm_poc_is_checkout_submit([]), 'cart view or no request: code taken out');
 }
 
+// Per-code limits (ADR-0013): a code limited to 5 allows a customer's 1st to 5th order and refuses the 6th.
+$limits = ['MULTI-FIVE' => 5];
+$lcodes = ['SPRING-ONE', 'MULTI-FIVE'];
+ok(pm_poc_decide($lcodes, 'MULTI-FIVE', 20, holds(0), $limits) === null, 'limit 5, holds 0: passes');
+ok(pm_poc_decide($lcodes, 'MULTI-FIVE', 20, holds(4), $limits) === null, 'limit 5, holds 4: the 5th order passes');
+ok(pm_poc_decide($lcodes, 'MULTI-FIVE', 20, holds(5), $limits) === ['code' => 'MULTI-FIVE', 'held' => 5, 'limit' => 5], 'limit 5, holds 5: refused, row carries the limit');
+ok(pm_poc_decide($lcodes, 'multi-five', 20, holds(7), $limits) === ['code' => 'MULTI-FIVE', 'held' => 7, 'limit' => 5], 'limit 5, holds 7, lower case: refused');
+ok(pm_poc_decide($lcodes, 'MULTI-FIVE', 0, holds(9), $limits) === null, 'limit 5, guest: passes');
+ok(pm_poc_decide(['ONE'], 'ONE', 20, holds(1), ['ONE' => 1]) === ['code' => 'ONE', 'held' => 1], 'limit 1 behaves as the one-order rule');
+ok(pm_poc_decide($lcodes, 'SPRING-ONE', 20, holds(1), $limits) === ['code' => 'SPRING-ONE', 'held' => 1], 'code without a limit keeps the one-order rule');
+ok(pm_poc_decide(['SPRING-ONE'], 'MULTI-FIVE', 20, holds(9), $limits) === null, 'a limit for a code not in the code list enforces nothing');
+$lm = pm_poc_message(['code' => 'MULTI-FIVE', 'held' => 5, 'limit' => 5]);
+ok(strpos($lm, 'up to 5 orders') !== false && strpos($lm, 'already has 5 orders') !== false && strpos($lm, 'once per customer') === false, 'limit message names the limit and the held count');
+if ($hasCart) {
+    ok(pm_poc_cart_strip($lcodes, ['promo' => 'MULTI-FIVE'], 20, holds(4), $limits) === null, 'cart: 4 of 5 held, code stays');
+    $out = pm_poc_cart_strip($lcodes, ['promo' => 'MULTI-FIVE', 'products' => []], 20, holds(5), $limits);
+    ok($out !== null && !array_key_exists('promo', $out['cart']) && $out['row']['limit'] === 5, 'cart: 5 of 5 held, code taken out');
+}
+// Config reader for limits: optional; values must be whole numbers of at least 1; limited codes join the code list.
+$dir = sys_get_temp_dir() . '/promo-once-limits-' . getmypid();
+mkdir($dir, 0700);
+$lp = $dir . '/limits.json';
+file_put_contents($lp, '{"v":1,"codes":["SPRING-ONE"],"limits":{" multi-five ":5,"BAD-STR":"5","BAD-ZERO":0,"ONE":1,"BAD-FLOAT":2.5}}');
+ok(pm_poc_limits($lp) === ['MULTI-FIVE' => 5, 'ONE' => 1], 'limits read: normalized, non-integer and below-1 values dropped');
+ok(pm_poc_codes($lp) === ['SPRING-ONE', 'MULTI-FIVE', 'ONE'], 'codes read: the list plus every valid limited code, bad entries dropped');
+ok(in_array('MULTI-FIVE', pm_poc_codes($lp), true) && in_array('SPRING-ONE', pm_poc_codes($lp), true), 'code list holds both the listed and the limited code');
+file_put_contents($lp, '{"v":1,"codes":["SPRING-ONE"]}');
+ok(pm_poc_limits($lp) === [] && pm_poc_codes($lp) === ['SPRING-ONE'], 'config without limits: unchanged behaviour');
+unlink($lp);
+rmdir($dir);
+
 echo "promo-once-per-client: $pass passed, $fail failed\n";
 exit($fail === 0 ? 0 : 1);
