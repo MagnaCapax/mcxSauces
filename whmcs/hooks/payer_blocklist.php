@@ -520,6 +520,7 @@ if (function_exists('add_hook') && defined('ROOTDIR')) {
                 . '  -payer_blocklist ' . gmdate('d/m/Y'));
             return ['abortcmd' => true];
         } catch (\Throwable $e) {
+            error_log('payer_blocklist: provisioning check failed, service allowed: ' . $e->getMessage());
             return [];
         }
     });
